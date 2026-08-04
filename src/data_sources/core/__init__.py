@@ -1,0 +1,55 @@
+from data_sources.core.connector import Connector
+from data_sources.core.exceptions import (
+    AuthenticationError,
+    ConfigurationError,
+    ConnectionError,
+    ConnectorNotFoundError,
+    DataSourceError,
+    NotFoundError,
+    RateLimitError,
+    UnsupportedOperationError,
+)
+from data_sources.core.models import (
+    Change,
+    ChangeType,
+    Hash,
+    HashAlgorithm,
+    Item,
+    ItemType,
+    Permission,
+    PermissionPrincipalType,
+    PermissionRole,
+    SyncCursor,
+)
+from data_sources.core.registry import (
+    ConnectorRegistry,
+    create_connector,
+    register_connector,
+    registry,
+)
+
+__all__ = [
+    "AuthenticationError",
+    "Change",
+    "ChangeType",
+    "ConfigurationError",
+    "ConnectionError",
+    "Connector",
+    "ConnectorNotFoundError",
+    "ConnectorRegistry",
+    "DataSourceError",
+    "Hash",
+    "HashAlgorithm",
+    "Item",
+    "ItemType",
+    "NotFoundError",
+    "Permission",
+    "PermissionPrincipalType",
+    "PermissionRole",
+    "RateLimitError",
+    "SyncCursor",
+    "UnsupportedOperationError",
+    "create_connector",
+    "register_connector",
+    "registry",
+]

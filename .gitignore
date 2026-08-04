@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Pycharm
+.idea
+
+# Claude code files
+.claude
+Claude.md
