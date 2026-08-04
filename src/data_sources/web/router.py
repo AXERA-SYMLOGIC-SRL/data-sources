@@ -1,19 +1,41 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from typing import Any
+
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from data_sources.core.connector import Connector
 from data_sources.core.exceptions import NotFoundError
-from data_sources.core.models import Change, Item, Permission
+from data_sources.core.models import Item, Permission
 
 
-def build_router(connector: Connector, *, prefix: str = "") -> APIRouter:
+def build_router(
+    connector: Connector,
+    *,
+    prefix: str = "",
+    on_webhook_notification: Callable[[Connector, dict[str, Any]], Awaitable[None]] | None = None,
+) -> APIRouter:
     """Build an `APIRouter` exposing generic item and webhook endpoints for `connector`.
 
     Routes are derived entirely from the `Connector` interface: read endpoints are
     always present, `/webhooks` is added only when `connector.supports_webhooks`,
     and `/items/{item_id}/permissions` only when `connector.supports_permissions`.
+
+    A verified webhook notification is only ever handed to `on_webhook_notification`
+    — this router never runs `connector.sync()` itself, and never decides *how*
+    `on_webhook_notification` runs either: it's awaited in place, so a slow callback
+    holds the HTTP response open. A caller wanting a fast ack should return quickly
+    itself (e.g. hand off to its own task queue) rather than relying on this router
+    to do that for them. Pass `on_webhook_notification=None` (the default) to just
+    acknowledge notifications without reacting to them.
+
+    The callback also receives the verified payload, not just the connector: some
+    providers' webhooks are pure pings with no data of their own (Graph/SharePoint —
+    you always have to call `sync()` to learn what changed), but others deliver the
+    actual event in the notification body itself, in which case the payload *is*
+    the useful part and the caller shouldn't have to re-parse `request.json()`.
     """
     router = APIRouter(prefix=prefix, tags=[connector.provider])
 
@@ -56,11 +78,11 @@ def build_router(connector: Connector, *, prefix: str = "") -> APIRouter:
 
     if connector.supports_webhooks:
 
-        @router.post("/webhooks", status_code=202, response_model=list[Change])
+        @router.post("/webhooks", status_code=202, response_model=None)
         async def receive_webhook(
             request: Request,
             validation_token: str | None = Query(default=None, alias="validationToken"),
-        ) -> list[Change] | PlainTextResponse:
+        ) -> None | PlainTextResponse:
             # Graph (and similar providers) validate a new subscription's notificationUrl
             # synchronously at creation time: they POST here with `?validationToken=...`
             # and require it echoed back as plain text, no body read, before anything else.
@@ -77,8 +99,8 @@ def build_router(connector: Connector, *, prefix: str = "") -> APIRouter:
                     status_code=401, detail="webhook notification failed verification"
                 )
 
-            if not connector.supports_sync:
-                return []
-            return [change async for change in connector.sync()]
+            if on_webhook_notification is not None:
+                await on_webhook_notification(connector, payload)
+            return None
 
     return router
