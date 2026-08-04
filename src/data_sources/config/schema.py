@@ -19,3 +19,11 @@ class ConnectorConfig(BaseModel):
     name: str | None = None
     auth: AuthConfig | None = None
     options: dict[str, Any] = Field(default_factory=dict)
+
+
+class StoreConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    driver: str = "sqlite"
+    url: str | None = None
+    options: dict[str, Any] = Field(default_factory=dict)

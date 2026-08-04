@@ -7,6 +7,7 @@ from data_sources.core.exceptions import (
     DataSourceError,
     NotFoundError,
     RateLimitError,
+    StoreNotFoundError,
     UnsupportedOperationError,
 )
 from data_sources.core.models import (
@@ -47,6 +48,7 @@ __all__ = [
     "PermissionPrincipalType",
     "PermissionRole",
     "RateLimitError",
+    "StoreNotFoundError",
     "SyncCursor",
     "UnsupportedOperationError",
     "create_connector",

@@ -10,6 +10,10 @@ class ConnectorNotFoundError(DataSourceError):
     """Raised when no connector is registered for a given provider."""
 
 
+class StoreNotFoundError(DataSourceError):
+    """Raised when no store is registered for a given driver."""
+
+
 class ConnectionError(DataSourceError):
     """Raised when a connector fails to establish or validate a connection."""
 
