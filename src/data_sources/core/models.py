@@ -66,12 +66,16 @@ class ChangeType(StrEnum):
     DELETED = "deleted"
 
 
+class SyncCursor(BaseModel):
+    token: str | None = None
+
+
 class Change(BaseModel):
     item_id: str
     type: ChangeType
     item: Item | None = None
     timestamp: datetime | None = None
-
-
-class SyncCursor(BaseModel):
-    token: str | None = None
+    #: Cursor reflecting sync progress once this change (and everything before it in the
+    #: same `sync()` call) has been durably processed. `None` when the provider's delta
+    #: API doesn't expose per-item resume points (e.g. only a per-page token).
+    cursor: SyncCursor | None = None
