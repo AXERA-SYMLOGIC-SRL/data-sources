@@ -30,7 +30,7 @@ config = ConnectorConfig(
     ),
     options={
         "url": "https://contoso.sharepoint.com/sites/Finance/_layouts/15/AllItems.aspx"
-               "?id=/sites/Finance/Shared Documents/Reports/Q1",
+        "?id=/sites/Finance/Shared Documents/Reports/Q1",
         "excluded_paths": ["Archive"],  # optional, relative to the folder above
     },
 )
@@ -81,11 +81,13 @@ await connector.close()
 ```python
 from data_sources.core import ChangeType
 
+
 async def on_change(change):
     if change.type is ChangeType.DELETED:
         ...
     else:
         content = b"".join([chunk async for chunk in connector.download(change.item)])
+
 
 await connector.sync_in_background(on_change)
 ```
@@ -131,15 +133,19 @@ signature verification for you (`connector.verify_webhook_notification` checks t
 from fastapi import FastAPI
 from data_sources.web import build_connectors_router
 
+
 async def on_webhook_notification(connector, payload):
     # "something changed" — decide *if and when* to actually sync. This connector's
     # notifications never carry data of their own, so `payload` isn't useful here
     # (unlike providers whose webhook body *is* the event).
     await connector.sync_in_background(on_change)
 
+
 app = FastAPI()
 app.include_router(
-    build_connectors_router({"finance-q1": connector}, on_webhook_notification=on_webhook_notification),
+    build_connectors_router(
+        {"finance-q1": connector}, on_webhook_notification=on_webhook_notification
+    ),
     prefix="/sharepoint",
 )
 ```
@@ -158,6 +164,7 @@ Two things this router deliberately leaves to you:
   import asyncio
 
   sync_lock = asyncio.Lock()
+
 
   async def run_sync():
       if sync_lock.locked():

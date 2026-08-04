@@ -93,6 +93,7 @@ subclass of `SQLAlchemyStore` registered under a driver name:
 ```python
 from data_sources.store import register_store, SQLAlchemyStore
 
+
 @register_store("mysql")
 class MySQLStore(SQLAlchemyStore):
     driver = "mysql"
