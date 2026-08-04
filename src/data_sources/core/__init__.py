@@ -20,6 +20,7 @@ from data_sources.core.models import (
     Permission,
     PermissionPrincipalType,
     PermissionRole,
+    Subscription,
     SyncCursor,
 )
 from data_sources.core.registry import (
@@ -49,6 +50,7 @@ __all__ = [
     "PermissionRole",
     "RateLimitError",
     "StoreNotFoundError",
+    "Subscription",
     "SyncCursor",
     "UnsupportedOperationError",
     "create_connector",

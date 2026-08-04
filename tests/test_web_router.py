@@ -1,5 +1,6 @@
 import builtins
 from collections.abc import AsyncIterator
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -21,10 +22,18 @@ from data_sources.web.app import build_connectors_router
 
 
 class WebDummyConnector(Connector):
+    """Dummy `Connector`. `verify_webhook_notification` trusts every payload by default —
+    `options["accept_webhooks"]` flips that, to exercise the router's reject path — since
+    this dummy isn't backed by a real subscription secret to check against."""
+
     provider = "web-dummy"
     supports_permissions = True
     supports_webhooks = True
     supports_sync = True
+
+    def __init__(self, config: ConnectorConfig) -> None:
+        super().__init__(config)
+        self._accept_webhooks = bool(config.options.get("accept_webhooks", True))
 
     async def connect(self) -> None:
         pass
@@ -55,6 +64,9 @@ class WebDummyConnector(Connector):
 
     async def sync(self, cursor: SyncCursor | None = None) -> AsyncIterator[Change]:
         yield Change(item_id="1", type=ChangeType.UPDATED)
+
+    async def verify_webhook_notification(self, payload: dict[str, Any]) -> bool:
+        return self._accept_webhooks
 
     async def close(self) -> None:
         pass
@@ -109,6 +121,26 @@ def test_webhook_triggers_sync() -> None:
 
     assert response.status_code == 202
     assert response.json()[0]["item_id"] == "1"
+
+
+def test_webhook_rejected_when_verification_fails() -> None:
+    client = _client(
+        WebDummyConnector(ConnectorConfig(provider="web-dummy", options={"accept_webhooks": False}))
+    )
+
+    response = client.post("/webhooks", json={})
+
+    assert response.status_code == 401
+
+
+def test_webhook_validation_handshake_echoes_token_as_plain_text() -> None:
+    client = _client(WebDummyConnector(ConnectorConfig(provider="web-dummy")))
+
+    response = client.post("/webhooks?validationToken=abc123")
+
+    assert response.status_code == 200
+    assert response.text == "abc123"
+    assert response.headers["content-type"].startswith("text/plain")
 
 
 def test_build_connectors_router_mounts_by_name() -> None:

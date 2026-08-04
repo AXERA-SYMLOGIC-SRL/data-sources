@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from data_sources.core.connector import Connector
 from data_sources.core.exceptions import NotFoundError
@@ -57,8 +57,26 @@ def build_router(connector: Connector, *, prefix: str = "") -> APIRouter:
     if connector.supports_webhooks:
 
         @router.post("/webhooks", status_code=202, response_model=list[Change])
-        async def receive_webhook(request: Request) -> list[Change]:
-            await request.body()
+        async def receive_webhook(
+            request: Request,
+            validation_token: str | None = Query(default=None, alias="validationToken"),
+        ) -> list[Change] | PlainTextResponse:
+            # Graph (and similar providers) validate a new subscription's notificationUrl
+            # synchronously at creation time: they POST here with `?validationToken=...`
+            # and require it echoed back as plain text, no body read, before anything else.
+            if validation_token is not None:
+                return PlainTextResponse(validation_token)
+
+            try:
+                payload = await request.json()
+            except ValueError:
+                payload = {}
+
+            if not await connector.verify_webhook_notification(payload):
+                raise HTTPException(
+                    status_code=401, detail="webhook notification failed verification"
+                )
+
             if not connector.supports_sync:
                 return []
             return [change async for change in connector.sync()]

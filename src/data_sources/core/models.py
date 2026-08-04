@@ -79,3 +79,13 @@ class Change(BaseModel):
     #: same `sync()` call) has been durably processed. `None` when the provider's delta
     #: API doesn't expose per-item resume points (e.g. only a per-page token).
     cursor: SyncCursor | None = None
+
+
+class Subscription(BaseModel):
+    """A provider's change-notification subscription (e.g. a Graph webhook)."""
+
+    id: str
+    resource: str
+    notification_url: str
+    expiration: datetime
+    client_state: str | None = None

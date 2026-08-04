@@ -4,11 +4,11 @@ import builtins
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from types import TracebackType
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from data_sources.config.schema import ConnectorConfig
 from data_sources.core.exceptions import UnsupportedOperationError
-from data_sources.core.models import Change, ChangeType, Item, Permission, SyncCursor
+from data_sources.core.models import Change, ChangeType, Item, Permission, Subscription, SyncCursor
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import DeclarativeBase
@@ -138,6 +138,47 @@ class Connector(ABC):
         Only required when `supports_item_lookup` is True.
         """
         raise UnsupportedOperationError(f"{self.provider} does not support item lookup")
+
+    async def create_webhook(self, notification_url: str) -> Subscription:
+        """Subscribe to change notifications for this connector's resource.
+
+        `notification_url` is where the provider will POST notifications; delivering
+        them to `sync()`/`sync_in_background` is the caller's job, not the connector's.
+        Only available when `supports_webhooks` is True.
+        """
+        raise UnsupportedOperationError(f"{self.provider} does not support webhooks")
+
+    async def renew_webhook(self, subscription_id: str) -> Subscription:
+        """Extend a subscription created by `create_webhook` past its expiration.
+
+        Only available when `supports_webhooks` is True.
+        """
+        raise UnsupportedOperationError(f"{self.provider} does not support webhooks")
+
+    async def delete_webhook(self, subscription_id: str) -> None:
+        """Cancel a subscription created by `create_webhook`.
+
+        Only available when `supports_webhooks` is True.
+        """
+        raise UnsupportedOperationError(f"{self.provider} does not support webhooks")
+
+    async def list_webhooks(self) -> builtins.list[Subscription]:
+        """List this connector's own active subscriptions at the provider.
+
+        Only available when `supports_webhooks` is True.
+        """
+        raise UnsupportedOperationError(f"{self.provider} does not support webhooks")
+
+    async def verify_webhook_notification(self, payload: dict[str, Any]) -> bool:
+        """Check whether an inbound webhook POST body actually came from a subscription
+        this connector itself created via `create_webhook` — e.g. by comparing a secret
+        generated at creation time against one embedded in `payload`.
+
+        Unlike the other optional webhook methods, the default is to reject (`False`)
+        rather than raise: a connector that claims `supports_webhooks` but doesn't
+        override this would otherwise leave every caller trusting unverified payloads.
+        """
+        return False
 
     async def get_permissions(self, item: Item) -> builtins.list[Permission]:
         """Return the permissions on `item`. Only available when `supports_permissions` is True."""

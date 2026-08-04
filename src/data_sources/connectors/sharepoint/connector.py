@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import builtins
+import secrets
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from azure.identity.aio import ClientSecretCredential
 
 from data_sources.config.schema import ConnectorConfig
 from data_sources.connectors.sharepoint.client import SharepointClient
-from data_sources.connectors.sharepoint.models import SharePointItemRecord, SharePointSyncState
+from data_sources.connectors.sharepoint.models import (
+    SharePointItemRecord,
+    SharePointSyncState,
+    SharePointWebhookState,
+)
 from data_sources.core.connector import Connector
 from data_sources.core.exceptions import ConfigurationError, ConnectionError, DataSourceError
 from data_sources.core.models import (
@@ -18,6 +24,7 @@ from data_sources.core.models import (
     HashAlgorithm,
     Item,
     ItemType,
+    Subscription,
     SyncCursor,
 )
 from data_sources.core.registry import register_connector
@@ -29,6 +36,10 @@ _HASH_FIELDS = (
     ("sha1Hash", HashAlgorithm.SHA1),
     ("sha256Hash", HashAlgorithm.SHA256),
 )
+
+#: Graph's max subscription lifetime for drive/list resources (SharePoint document
+#: libraries fall under "list" here, not the shorter driveItem limit).
+_MAX_SUBSCRIPTION_LIFETIME = timedelta(days=30)
 
 
 @register_connector("sharepoint")
@@ -51,7 +62,8 @@ class SharePointConnector(Connector):
     provider = "sharepoint"
     supports_sync = True
     supports_item_lookup = True
-    models = (SharePointSyncState, SharePointItemRecord)
+    supports_webhooks = True
+    models = (SharePointSyncState, SharePointItemRecord, SharePointWebhookState)
 
     def __init__(self, config: ConnectorConfig) -> None:
         super().__init__(config)
@@ -227,6 +239,83 @@ class SharePointConnector(Connector):
                 await session.delete(record)
                 await session.commit()
 
+    @property
+    def _webhook_resource(self) -> str:
+        return f"/drives/{self._resolved_drive_id}/root"
+
+    async def create_webhook(self, notification_url: str) -> Subscription:
+        client_state = secrets.token_urlsafe(32)
+        raw = await self.client.create_subscription(
+            self._webhook_resource,
+            notification_url,
+            _default_expiration(),
+            client_state,
+        )
+        subscription = _to_subscription(raw)
+        await self._save_webhook_state(subscription.id, client_state)
+        return subscription
+
+    async def renew_webhook(self, subscription_id: str) -> Subscription:
+        raw = await self.client.renew_subscription(subscription_id, _default_expiration())
+        return _to_subscription(raw)
+
+    async def delete_webhook(self, subscription_id: str) -> None:
+        await self.client.delete_subscription(subscription_id)
+        await self._clear_webhook_state(subscription_id)
+
+    async def list_webhooks(self) -> builtins.list[Subscription]:
+        resource = self._webhook_resource
+        return [
+            _to_subscription(raw)
+            async for raw in self.client.list_subscriptions()
+            if raw.get("resource") == resource
+        ]
+
+    async def verify_webhook_notification(self, payload: dict[str, Any]) -> bool:
+        state = await self._load_webhook_state()
+        if state is None:
+            return False
+
+        notifications = payload.get("value") or []
+        if not notifications:
+            return False
+
+        return all(
+            notification.get("subscriptionId") == state.subscription_id
+            and notification.get("clientState") == state.client_state
+            for notification in notifications
+        )
+
+    async def _load_webhook_state(self) -> SharePointWebhookState | None:
+        assert self.store is not None
+        async with self.store.session() as session:
+            return await session.get(SharePointWebhookState, self._sync_key)
+
+    async def _save_webhook_state(self, subscription_id: str, client_state: str) -> None:
+        assert self.store is not None
+        async with self.store.session() as session:
+            state = await session.get(SharePointWebhookState, self._sync_key)
+            if state is None:
+                session.add(
+                    SharePointWebhookState(
+                        drive_key=self._sync_key,
+                        subscription_id=subscription_id,
+                        client_state=client_state,
+                    )
+                )
+            else:
+                state.subscription_id = subscription_id
+                state.client_state = client_state
+            await session.commit()
+
+    async def _clear_webhook_state(self, subscription_id: str) -> None:
+        assert self.store is not None
+        async with self.store.session() as session:
+            state = await session.get(SharePointWebhookState, self._sync_key)
+            if state is not None and state.subscription_id == subscription_id:
+                await session.delete(state)
+                await session.commit()
+
     async def close(self) -> None:
         if self._client is not None:
             await self._client.close()
@@ -284,3 +373,17 @@ def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _default_expiration() -> datetime:
+    return datetime.now(UTC) + _MAX_SUBSCRIPTION_LIFETIME
+
+
+def _to_subscription(raw: dict[str, Any]) -> Subscription:
+    return Subscription(
+        id=raw["id"],
+        resource=raw["resource"],
+        notification_url=raw["notificationUrl"],
+        expiration=datetime.fromisoformat(raw["expirationDateTime"].replace("Z", "+00:00")),
+        client_state=raw.get("clientState"),
+    )

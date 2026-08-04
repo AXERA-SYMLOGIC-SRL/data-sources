@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
 
@@ -151,6 +152,60 @@ class SharepointClient:
             for item in page.get("value", []):
                 yield item, page_delta_link
             next_url = page.get("@odata.nextLink")
+
+    async def create_subscription(
+        self,
+        resource: str,
+        notification_url: str,
+        expiration: datetime,
+        client_state: str | None = None,
+    ) -> dict[str, Any]:
+        """Register a Graph subscription delivering change notifications for `resource`
+        to `notification_url`.
+
+        Graph validates `notification_url` synchronously before returning: it POSTs a
+        `validationToken` there and requires it echoed back as plain text within 10
+        seconds, so this call fails if that handshake isn't wired up on the receiving end.
+        """
+        body: dict[str, Any] = {
+            "changeType": "updated",
+            "resource": resource,
+            "notificationUrl": notification_url,
+            "expirationDateTime": self._format_expiration(expiration),
+        }
+        if client_state is not None:
+            body["clientState"] = client_state
+
+        response = await self._http.post(
+            f"{self.BASE_URL}/subscriptions", json=body, headers=await self._auth_header()
+        )
+        self._raise_for_status(response)
+        return dict(response.json())
+
+    def list_subscriptions(self) -> AsyncIterator[dict[str, Any]]:
+        return self._paginate(f"{self.BASE_URL}/subscriptions")
+
+    async def renew_subscription(
+        self, subscription_id: str, expiration: datetime
+    ) -> dict[str, Any]:
+        response = await self._http.patch(
+            f"{self.BASE_URL}/subscriptions/{subscription_id}",
+            json={"expirationDateTime": self._format_expiration(expiration)},
+            headers=await self._auth_header(),
+        )
+        self._raise_for_status(response)
+        return dict(response.json())
+
+    async def delete_subscription(self, subscription_id: str) -> None:
+        response = await self._http.delete(
+            f"{self.BASE_URL}/subscriptions/{subscription_id}", headers=await self._auth_header()
+        )
+        self._raise_for_status(response)
+
+    @staticmethod
+    def _format_expiration(expiration: datetime) -> str:
+        """Graph expects an ISO 8601 UTC timestamp; `Z` is the only suffix it accepts."""
+        return expiration.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
     @staticmethod
     def parse_sharing_url(url: str) -> tuple[str, str]:

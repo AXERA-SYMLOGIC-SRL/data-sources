@@ -27,3 +27,17 @@ class SharePointItemRecord(Base):
     drive_key: Mapped[str] = mapped_column(String(255), primary_key=True)
     item_id: Mapped[str] = mapped_column(String(255), primary_key=True)
     data: Mapped[str] = mapped_column(Text)
+
+
+class SharePointWebhookState(Base):
+    """Persists the `clientState` secret `SharePointConnector.create_webhook` generated
+    for its currently active subscription, so a later inbound notification can be
+    verified as having actually come from that subscription rather than an arbitrary
+    POST to the webhook endpoint.
+    """
+
+    __tablename__ = "sharepoint_webhook_state"
+
+    drive_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    subscription_id: Mapped[str] = mapped_column(String(255))
+    client_state: Mapped[str] = mapped_column(String(255))
