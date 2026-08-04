@@ -95,7 +95,7 @@ Routes are generated from the `Connector` interface: `/webhooks` only appears wh
 | Google Drive | ❌ Planned |
 | Google Shared Drives | ❌ Planned |
 | Microsoft OneDrive | ❌ Planned |
-| SharePoint Online | ❌ Planned |
+| SharePoint Online | ✅ Supported |
 | Microsoft Teams Files | ❌ Planned |
 | Dropbox | ❌ Planned |
 | Box | ❌ Planned |
@@ -116,6 +116,13 @@ Routes are generated from the `Connector` interface: `/webhooks` only appears wh
 | GitLab Repositories | ❌ Planned |
 | Bitbucket | ❌ Planned |
 | Jira Attachments | ❌ Planned |
+
+---
+
+# Documentation
+
+- [SharePoint connector](docs/sharepoint.md) — configuration, sync, item lookup, webhooks
+- [Store driver](docs/store.md) — configuring SQLite/PostgreSQL, migrations, adding a driver
 
 ---
 
