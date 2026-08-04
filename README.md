@@ -66,6 +66,26 @@ async for item in connector.list():
 content = await connector.download(item)
 ```
 
+## HTTP API (optional)
+
+Install the `api` extra to expose connectors over HTTP — item listing, metadata,
+download, permissions, and webhook receivers — without writing any routes by hand:
+
+```bash
+pip install "axera-data-sources[api]"
+```
+
+```python
+from fastapi import FastAPI
+from data_sources.web import build_connectors_router
+
+app = FastAPI()
+app.include_router(build_connectors_router({"google_drive": connector}), prefix="/connectors")
+```
+
+Routes are generated from the `Connector` interface: `/webhooks` only appears when
+`supports_webhooks` is set, and `/permissions` only when `supports_permissions` is set.
+
 ---
 
 # Supported Data Sources

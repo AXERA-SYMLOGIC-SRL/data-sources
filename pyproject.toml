@@ -29,6 +29,9 @@ Homepage = "https://github.com/AXERA-SYMLOGIC-SRL/data-sources"
 Repository = "https://github.com/AXERA-SYMLOGIC-SRL/data-sources"
 Issues = "https://github.com/AXERA-SYMLOGIC-SRL/data-sources/issues"
 
+[project.optional-dependencies]
+api = ["fastapi (>=0.141.1,<0.142.0)"]
+
 [tool.poetry]
 packages = [{ include = "data_sources", from = "src" }]
 
@@ -42,7 +45,8 @@ dev = [
     "ruff (>=0.16.1,<0.17.0)",
     "mypy (>=2.3.0,<3.0.0)",
     "pytest-asyncio (>=1.4.0,<2.0.0)",
-    "types-pyyaml (>=6.0.12.20260724,<7.0.0.0)"
+    "types-pyyaml (>=6.0.12.20260724,<7.0.0.0)",
+    "httpx (>=0.28.1,<0.29.0)"
 ]
 
 [tool.pytest.ini_options]
