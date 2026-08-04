@@ -104,8 +104,8 @@ Routes are generated from the `Connector` interface: `/webhooks` only appears wh
 | Azure Data Lake Storage Gen2 | ❌ Planned |
 | Google Cloud Storage | ❌ Planned |
 | MinIO | ❌ Planned |
-| SFTP | ❌ Planned |
-| FTP / FTPS | ❌ Planned |
+| SFTP | ✅ Supported |
+| FTP / FTPS | ⚠️ FTP supported (via the SFTP connector); FTPS planned |
 | SMB / CIFS | ❌ Planned |
 | NFS | ❌ Planned |
 | Local File System | ❌ Planned |
@@ -122,6 +122,7 @@ Routes are generated from the `Connector` interface: `/webhooks` only appears wh
 # Documentation
 
 - [SharePoint connector](docs/sharepoint.md) — configuration, sync, item lookup, webhooks
+- [SFTP connector](docs/sftp.md) — configuration, sync, item lookup
 - [Store driver](docs/store.md) — configuring SQLite/PostgreSQL, migrations, adding a driver
 
 ---

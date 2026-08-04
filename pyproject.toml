@@ -24,10 +24,12 @@ dependencies = [
     "pyyaml (>=6.0.3,<7.0.0)",
     "httpx (>=0.28.1,<0.29.0)",
     "azure-identity (>=1.19.0,<2.0.0)",
+    "asyncssh (>=2.14.2,<3.0.0)",
     "sqlalchemy (>=2.0.44,<3.0.0)",
     "greenlet (>=3.0.0,<4.0.0)",
     "alembic (>=1.16.5,<2.0.0)",
-    "aiosqlite (>=0.21.0,<0.22.0)"
+    "aiosqlite (>=0.21.0,<0.22.0)",
+    "aioftp (>=0.27.2,<0.28.0)"
 ]
 
 [project.urls]
