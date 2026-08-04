@@ -132,3 +132,90 @@ async def test_sync_in_background_requires_sync_support() -> None:
 
     with pytest.raises(UnsupportedOperationError):
         await connector.sync_in_background(on_change)
+
+
+class ItemLookupConnector(Connector):
+    """Connector whose `sync()` yields a create followed by a delete, backed by an
+    in-memory item index instead of a real tracking table — enough to exercise
+    `sync_in_background`'s item-lookup wiring without a `Store`."""
+
+    provider = "item-lookup-dummy"
+    supports_sync = True
+    supports_item_lookup = True
+
+    def __init__(self, config: ConnectorConfig) -> None:
+        super().__init__(config)
+        self.saved_items: dict[str, Item] = {}
+        self.committed_cursor: SyncCursor | None = None
+
+    async def connect(self) -> None:
+        pass
+
+    async def validate(self) -> bool:
+        return True
+
+    async def list(
+        self, path: str | None = None, *, recursive: bool = False
+    ) -> AsyncIterator[Item]:
+        return
+        yield
+
+    async def get_metadata(self, item_id: str) -> Item:
+        return Item(id=item_id, name="file.txt", type=ItemType.FILE)
+
+    async def download(self, item: Item) -> AsyncIterator[bytes]:
+        return
+        yield
+
+    async def sync(self, cursor: SyncCursor | None = None) -> AsyncIterator[Change]:
+        item = Item(id="1", name="file.txt", type=ItemType.FILE)
+        yield Change(item_id="1", type=ChangeType.CREATED, item=item, cursor=SyncCursor(token="1"))
+        yield Change(item_id="2", type=ChangeType.DELETED, cursor=SyncCursor(token="2"))
+
+    async def _load_cursor(self) -> SyncCursor | None:
+        return self.committed_cursor
+
+    async def _commit_cursor(self, cursor: SyncCursor) -> None:
+        self.committed_cursor = cursor
+
+    async def get_item(self, item_id: str) -> Item | None:
+        return self.saved_items.get(item_id)
+
+    async def _save_item(self, item: Item) -> None:
+        self.saved_items[item.id] = item
+
+    async def _delete_item(self, item_id: str) -> None:
+        self.saved_items.pop(item_id, None)
+
+    async def close(self) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_sync_in_background_saves_and_deletes_items_when_supported() -> None:
+    connector = ItemLookupConnector(ConnectorConfig(provider="item-lookup-dummy"))
+    connector.saved_items["2"] = Item(id="2", name="stale.txt", type=ItemType.FILE)
+
+    async def on_change(change: Change) -> None:
+        pass
+
+    await connector.sync_in_background(on_change)
+
+    assert await connector.get_item("1") == Item(id="1", name="file.txt", type=ItemType.FILE)
+    assert await connector.get_item("2") is None
+
+
+@pytest.mark.asyncio
+async def test_sync_in_background_skips_item_persistence_when_unsupported() -> None:
+    # `SyncingConnector` doesn't override _save_item/_delete_item; if sync_in_background
+    # called them unconditionally (rather than gating on supports_item_lookup) this would
+    # raise UnsupportedOperationError instead of completing normally.
+    connector = SyncingConnector(ConnectorConfig(provider="syncing-dummy"))
+
+    async def on_change(change: Change) -> None:
+        pass
+
+    await connector.sync_in_background(on_change)
+
+    with pytest.raises(UnsupportedOperationError):
+        await connector.get_item("1")

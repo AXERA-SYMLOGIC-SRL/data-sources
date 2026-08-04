@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from data_sources.config.schema import ConnectorConfig
 from data_sources.core.exceptions import UnsupportedOperationError
-from data_sources.core.models import Change, Item, Permission, SyncCursor
+from data_sources.core.models import Change, ChangeType, Item, Permission, SyncCursor
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import DeclarativeBase
@@ -24,6 +24,7 @@ class Connector(ABC):
     supports_sync: ClassVar[bool] = False
     supports_permissions: ClassVar[bool] = False
     supports_webhooks: ClassVar[bool] = False
+    supports_item_lookup: ClassVar[bool] = False
 
     #: ORM models (subclasses of `data_sources.store.models.Base`) this connector persists.
     #: Declared per-class; a `Store` creates their tables/indexes when the connector is
@@ -96,14 +97,47 @@ class Connector(ABC):
         committed after `on_change` returns for it, so `on_change` must be idempotent: a
         crash between the two redelivers that change on the next run.
 
+        When `supports_item_lookup` is True, each change also updates this connector's own
+        item index (see `_save_item`/`_delete_item`), so a later `get_item(item_id)` call
+        can resolve a synced item without a live provider call — a caller only needs to have
+        kept the id (e.g. from a `Change`), not the `Item` itself.
+
         Runs until `sync()` is exhausted; callers that want a long-lived poll loop should
         call this repeatedly (e.g. on a timer or after a webhook ping).
         """
         cursor = await self._load_cursor()
         async for change in self.sync(cursor):
             await on_change(change)
+            if self.supports_item_lookup:
+                if change.type == ChangeType.DELETED:
+                    await self._delete_item(change.item_id)
+                elif change.item is not None:
+                    await self._save_item(change.item)
             if change.cursor is not None:
                 await self._commit_cursor(change.cursor)
+
+    async def get_item(self, item_id: str) -> Item | None:
+        """Look up a previously-synced item from this connector's own storage.
+
+        Returns `None` if `item_id` was never synced (or has since been deleted), rather
+        than falling back to a live provider call — callers wanting the latter should use
+        `get_metadata`. Only available when `supports_item_lookup` is True.
+        """
+        raise UnsupportedOperationError(f"{self.provider} does not support item lookup")
+
+    async def _save_item(self, item: Item) -> None:
+        """Persist `item` so a later `get_item` call can resolve it.
+
+        Only required when `supports_item_lookup` is True.
+        """
+        raise UnsupportedOperationError(f"{self.provider} does not support item lookup")
+
+    async def _delete_item(self, item_id: str) -> None:
+        """Remove a previously-persisted item, called when `sync()` yields a deletion.
+
+        Only required when `supports_item_lookup` is True.
+        """
+        raise UnsupportedOperationError(f"{self.provider} does not support item lookup")
 
     async def get_permissions(self, item: Item) -> builtins.list[Permission]:
         """Return the permissions on `item`. Only available when `supports_permissions` is True."""
