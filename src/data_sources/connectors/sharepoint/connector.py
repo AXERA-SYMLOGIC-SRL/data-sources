@@ -17,6 +17,7 @@ from data_sources.connectors.sharepoint.models import (
 )
 from data_sources.core.connector import Connector
 from data_sources.core.exceptions import ConfigurationError, ConnectionError, DataSourceError
+from data_sources.core.logging import logger
 from data_sources.core.models import (
     Change,
     ChangeType,
@@ -78,6 +79,7 @@ class SharePointConnector(Connector):
         self._site_id: str | None = None
         self._drive_id: str | None = None
         self._client: SharepointClient | None = None
+        self.logger = logger.getChild("sharepoint.connector")
 
     @property
     def client(self) -> SharepointClient:
@@ -130,7 +132,8 @@ class SharePointConnector(Connector):
             await self.client.get_item_by_path(
                 self._resolved_site_id, self._resolved_drive_id, self._root_path
             )
-        except DataSourceError:
+        except DataSourceError as exc:
+            self.logger.warning(f"validate() failed for path {self._root_path!r}: {exc}")
             return False
         return True
 
