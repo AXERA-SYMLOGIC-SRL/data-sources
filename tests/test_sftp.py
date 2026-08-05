@@ -12,11 +12,11 @@ import asyncssh
 import pytest
 
 from data_sources.config.schema import AuthConfig, ConnectorConfig, StoreConfig
-from data_sources.connectors.sftp.client import SFTPClient
 from data_sources.connectors.sftp.connector import SFTPConnector
 from data_sources.connectors.sftp.entries import RemoteClient, RemoteEntry
 from data_sources.connectors.sftp.ftp_client import FTPClient
 from data_sources.connectors.sftp.models import SFTPItemRecord, SFTPSyncState
+from data_sources.connectors.sftp.sftp_client import SFTPClient
 from data_sources.core.exceptions import (
     AuthenticationError,
     ConfigurationError,
@@ -375,7 +375,7 @@ async def test_sync_in_background_indexes_items_by_path(tmp_path: Path) -> None:
 
 class TestSFTPClientEntryMapping:
     def test_to_entry_reports_directory_from_permissions(self) -> None:
-        from data_sources.connectors.sftp.client import _to_entry
+        from data_sources.connectors.sftp.sftp_client import _to_entry
 
         attrs = asyncssh.SFTPAttrs()
         attrs.permissions = stat_module.S_IFDIR | 0o755
@@ -388,7 +388,7 @@ class TestSFTPClientEntryMapping:
         assert entry.mtime == datetime(2025, 1, 1, tzinfo=UTC)
 
     def test_to_entry_reports_file_from_permissions(self) -> None:
-        from data_sources.connectors.sftp.client import _to_entry
+        from data_sources.connectors.sftp.sftp_client import _to_entry
 
         attrs = asyncssh.SFTPAttrs()
         attrs.permissions = stat_module.S_IFREG | 0o644
@@ -405,7 +405,7 @@ class TestSFTPClientAgainstAsyncssh:
     async def test_connect_wraps_permission_denied_as_authentication_error(self) -> None:
         with (
             patch(
-                "data_sources.connectors.sftp.client.asyncssh.connect",
+                "data_sources.connectors.sftp.sftp_client.asyncssh.connect",
                 AsyncMock(side_effect=asyncssh.PermissionDenied("denied")),
             ),
             pytest.raises(AuthenticationError),

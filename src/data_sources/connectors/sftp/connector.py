@@ -7,12 +7,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 from data_sources.config.schema import ConnectorConfig
-from data_sources.connectors.sftp.client import SFTPClient
 from data_sources.connectors.sftp.entries import RemoteClient, RemoteEntry
 from data_sources.connectors.sftp.ftp_client import FTPClient
 from data_sources.connectors.sftp.models import SFTPItemRecord, SFTPSyncState
+from data_sources.connectors.sftp.sftp_client import SFTPClient
 from data_sources.core.connector import Connector
 from data_sources.core.exceptions import ConfigurationError, ConnectionError, DataSourceError
+from data_sources.core.logging import logger
 from data_sources.core.models import Change, ChangeType, Item, ItemType, SyncCursor
 from data_sources.core.registry import register_connector
 
@@ -71,6 +72,7 @@ class SFTPConnector(Connector):
         self._root_path = parsed.path or "/"
         self._excluded_paths = tuple(config.options.get("excluded_paths", ()))
         self._client: RemoteClient | None = None
+        self.logger = logger.getChild("sftp.connector")
 
     @property
     def client(self) -> RemoteClient:
@@ -112,7 +114,10 @@ class SFTPConnector(Connector):
     async def validate(self) -> bool:
         try:
             await self.client.stat(self._root_path)
-        except DataSourceError:
+        except DataSourceError as exc:
+            self.logger.warning(
+                f"validate() failed for {self._url} (root path {self._root_path!r}): {exc}"
+            )
             return False
         return True
 

@@ -14,6 +14,10 @@ from data_sources.core.logging import logger
 #: Read this many bytes per `download()` chunk.
 _CHUNK_SIZE = 64 * 1024
 
+#: Module-level so `connect()` (a classmethod, run before any instance exists) can log
+#: too; `__init__` reuses this same child logger for the instance.
+_logger = logger.getChild("sftp.client")
+
 
 class SFTPClient:
     """Thin async wrapper around asyncssh's SFTP client: authentication, directory
@@ -26,7 +30,7 @@ class SFTPClient:
     def __init__(self, connection: asyncssh.SSHClientConnection, sftp: asyncssh.SFTPClient) -> None:
         self._connection = connection
         self._sftp = sftp
-        self.logger = logger.getChild("sftp.client")
+        self.logger = _logger
 
     @classmethod
     async def connect(
@@ -55,11 +59,14 @@ class SFTPClient:
                 known_hosts=known_hosts,
             )
         except asyncssh.PermissionDenied as exc:
+            _logger.error(f"SFTP server {host}:{port} rejected credentials for {username}: {exc}")
             raise AuthenticationError(f"SFTP server rejected credentials: {exc}") from exc
         except asyncssh.Error as exc:
+            _logger.error(f"SFTP connection to {host}:{port} failed: {exc}")
             raise DataSourceError(f"SFTP connection to {host}:{port} failed: {exc}") from exc
 
         sftp = await connection.start_sftp_client()
+        _logger.info(f"Connected to SFTP server {host}:{port} as {username}")
         return cls(connection, sftp)
 
     async def close(self) -> None:
@@ -67,13 +74,16 @@ class SFTPClient:
         await self._sftp.wait_closed()
         self._connection.close()
         await self._connection.wait_closed()
+        self.logger.info("SFTP connection closed")
 
     async def stat(self, path: str) -> RemoteEntry:
         try:
             attrs = await self._sftp.stat(path)
         except asyncssh.SFTPNoSuchFile as exc:
+            self.logger.warning(f"SFTP path not found: {path}")
             raise NotFoundError(f"SFTP path not found: {path}") from exc
         except asyncssh.SFTPError as exc:
+            self.logger.error(f"SFTP error for {path}: {exc}")
             raise DataSourceError(f"SFTP error for {path}: {exc}") from exc
         return _to_entry(path, attrs)
 
@@ -81,8 +91,10 @@ class SFTPClient:
         try:
             names = await self._sftp.readdir(path)
         except asyncssh.SFTPNoSuchFile as exc:
+            self.logger.warning(f"SFTP path not found: {path}")
             raise NotFoundError(f"SFTP path not found: {path}") from exc
         except asyncssh.SFTPError as exc:
+            self.logger.error(f"SFTP error for {path}: {exc}")
             raise DataSourceError(f"SFTP error for {path}: {exc}") from exc
 
         for entry in names:
@@ -119,8 +131,10 @@ class SFTPClient:
                         break
                     yield cast(bytes, chunk)
         except asyncssh.SFTPNoSuchFile as exc:
+            self.logger.warning(f"SFTP path not found: {path}")
             raise NotFoundError(f"SFTP path not found: {path}") from exc
         except asyncssh.SFTPError as exc:
+            self.logger.error(f"SFTP error downloading {path}: {exc}")
             raise DataSourceError(f"SFTP error downloading {path}: {exc}") from exc
 
 

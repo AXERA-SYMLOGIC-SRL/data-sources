@@ -47,18 +47,21 @@ class SharepointClient:
     async def close(self) -> None:
         await self._http.aclose()
         await self.credential.close()
+        self.logger.info("SharePoint connection closed")
 
     async def _auth_header(self) -> dict[str, str]:
         token = await self.credential.get_token(*self.scopes)
         return {"Authorization": f"Bearer {token.token}"}
 
-    @staticmethod
-    def _raise_for_status(response: httpx.Response) -> None:
+    def _raise_for_status(self, response: httpx.Response) -> None:
         if response.status_code in (401, 403):
+            self.logger.error(f"Graph API rejected credentials: {response.text}")
             raise AuthenticationError(f"Graph API rejected credentials: {response.text}")
         if response.status_code in (404, 410):
+            self.logger.warning(f"Graph API item not found: {response.request.url}")
             raise NotFoundError(f"Graph API item not found: {response.request.url}")
         if response.status_code >= 400:
+            self.logger.error(f"Graph API error {response.status_code}: {response.text}")
             raise DataSourceError(f"Graph API error {response.status_code}: {response.text}")
 
     async def get_json(self, url: str, max_retries: int = 10) -> dict[str, Any]:
@@ -121,7 +124,9 @@ class SharepointClient:
         site_id = await self.get_site_id(site_url)
         async for drive in self.get_drive_ids(site_id):
             if unquote(drive["webUrl"].split("/")[-1]) == drive_name:
+                self.logger.info(f"Connected to SharePoint drive {drive_name!r} at {site_url}")
                 return site_id, drive["id"]
+        self.logger.error(f"No drive named {drive_name!r} at site {site_url}")
         raise NotFoundError(f"No drive named {drive_name!r} at site {site_url}")
 
     async def get_item_by_id(self, drive_id: str, item_id: str) -> dict[str, Any]:
