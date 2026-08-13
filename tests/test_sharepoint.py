@@ -29,6 +29,13 @@ SHARE_URL = (
     "?id=/sites/Finance/Shared Documents/Reports/Q1"
 )
 
+#: Same drive, but with no subfolder named in the sharing URL — the connector is
+#: scoped to the drive's own root.
+ROOT_SHARE_URL = (
+    "https://contoso.sharepoint.com/sites/Finance/_layouts/15/AllItems.aspx"
+    "?id=/sites/Finance/Shared Documents"
+)
+
 
 class FakeCredential:
     def __init__(self) -> None:
@@ -193,6 +200,50 @@ class TestList:
         assert [item.id for item in items] == ["1"]
         assert items[0].type == ItemType.FILE
         assert items[0].mime_type == "application/pdf"
+
+    @pytest.mark.asyncio
+    async def test_item_path_strips_drive_id_and_root_anchor(self) -> None:
+        """`Item.path` is relative to the configured root — never the raw Graph
+        `/drives/{id}/root:/...` prefix, which isn't client-facing (see `_relative_path`)."""
+        connector, fake_client = make_connector()
+        raws = [
+            _drive_item("1", "at-root.pdf"),
+            _drive_item("2", "nested.pdf", parent_path="/drives/drive1/root:/Reports/Q1/Archive"),
+        ]
+
+        async def fake_get_delta(
+            delta_url: str,
+        ) -> AsyncIterator[tuple[dict[str, Any], str | None]]:
+            for raw in raws:
+                yield raw, None
+
+        fake_client.get_delta = fake_get_delta  # type: ignore[method-assign,assignment]
+
+        items = [item async for item in connector.list(recursive=True)]
+
+        assert [item.path for item in items] == ["", "Archive"]
+
+    @pytest.mark.asyncio
+    async def test_item_path_strips_root_colon_when_scoped_to_drive_root(self) -> None:
+        """A connector scoped to the drive's own root (no subfolder in the sharing
+        URL) anchors on the literal `root:` segment instead of a folder name."""
+        connector, fake_client = make_connector(url=ROOT_SHARE_URL)
+        raws = [
+            _drive_item("1", "at-root.pdf", parent_path="/drives/drive1/root:"),
+            _drive_item("2", "nested.pdf", parent_path="/drives/drive1/root:/Invoices"),
+        ]
+
+        async def fake_get_delta(
+            delta_url: str,
+        ) -> AsyncIterator[tuple[dict[str, Any], str | None]]:
+            for raw in raws:
+                yield raw, None
+
+        fake_client.get_delta = fake_get_delta  # type: ignore[method-assign,assignment]
+
+        items = [item async for item in connector.list(recursive=True)]
+
+        assert [item.path for item in items] == ["", "Invoices"]
 
     @pytest.mark.asyncio
     async def test_non_recursive_uses_list_children(self) -> None:

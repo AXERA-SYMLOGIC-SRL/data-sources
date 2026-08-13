@@ -331,21 +331,34 @@ class SharePointConnector(Connector):
         """The last path segment Graph's `parentReference.path` uses for our root folder.
 
         Graph paths look like `/drives/{id}/root:/Reports/Q1/Archive` — never the drive's
-        display name — so excluded-path matching anchors on the root folder's own name
-        (or the literal `root:` segment when the connector is scoped to the drive root).
+        display name — so excluded-path matching and `_relative_path` both anchor on the
+        root folder's own name (or the literal `root:` segment when the connector is
+        scoped to the drive root).
         """
         if self._root_path in ("", "/"):
             return "root:"
         return self._root_path.rstrip("/").rsplit("/", 1)[-1]
 
+    def _relative_path(self, raw: dict[str, Any]) -> str:
+        """The item's parent path relative to our configured root, e.g. `Q2/Archive`.
+
+        Graph's `parentReference.path` is never client-facing — it's shaped like
+        `/drives/{id}/root:/Reports/Q1/Archive`, prefixed with the drive id and the
+        literal `root:` segment (see `_root_anchor`). Everything up to and including
+        that anchor is internal plumbing, so it's stripped here before the path is
+        surfaced as an `Item`/`Record` path.
+        """
+        raw_path = raw.get("parentReference", {}).get("path", "")
+        segments = raw_path.split("/")
+        anchor = self._root_anchor
+        if anchor not in segments:
+            return raw_path.lstrip("/")
+        return "/".join(segments[segments.index(anchor) + 1 :])
+
     def _is_excluded(self, raw: dict[str, Any]) -> bool:
         if not self._excluded_paths:
             return False
-        segments = raw.get("parentReference", {}).get("path", "").split("/")
-        anchor = self._root_anchor
-        if anchor not in segments:
-            return False
-        relative = "/".join(segments[segments.index(anchor) + 1 :])
+        relative = self._relative_path(raw)
         return any(relative.startswith(excluded) for excluded in self._excluded_paths)
 
     def _to_item(self, raw: dict[str, Any]) -> Item:
@@ -361,7 +374,7 @@ class SharePointConnector(Connector):
             id=raw["id"],
             name=raw.get("name", ""),
             type=ItemType.FOLDER if "folder" in raw else ItemType.FILE,
-            path=raw.get("parentReference", {}).get("path"),
+            path=self._relative_path(raw),
             parent_id=raw.get("parentReference", {}).get("id"),
             size=raw.get("size"),
             mime_type=file_info.get("mimeType"),
