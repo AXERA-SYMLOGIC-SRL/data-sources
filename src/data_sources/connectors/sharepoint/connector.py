@@ -348,7 +348,7 @@ class SharePointConnector(Connector):
         that anchor is internal plumbing, so it's stripped here before the path is
         surfaced as an `Item`/`Record` path.
         """
-        raw_path = raw.get("parentReference", {}).get("path", "")
+        raw_path: str = raw.get("parentReference", {}).get("path", "")
         segments = raw_path.split("/")
         anchor = self._root_anchor
         if anchor not in segments:
