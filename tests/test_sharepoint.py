@@ -851,6 +851,45 @@ class TestSharepointClientAgainstGraph:
             await client.delete_subscription("gone")
 
     @pytest.mark.asyncio
+    async def test_grant_site_permission_posts_roles_and_app_identity(self) -> None:
+        captured: dict[str, Any] = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST"
+            assert request.url.path == "/v1.0/sites/site1/permissions"
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(
+                201, json={"id": "perm-1", "roles": ["read"], "grantedToIdentities": []}
+            )
+
+        client = SharepointClient(
+            FakeCredential(),
+            ["scope"],
+            http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+
+        result = await client.grant_site_permission("site1", "app-client-id", ["read"])
+
+        assert captured["body"] == {
+            "roles": ["read"],
+            "grantedToIdentities": [
+                {"application": {"id": "app-client-id", "displayName": "app-client-id"}}
+            ],
+        }
+        assert result["id"] == "perm-1"
+
+    @pytest.mark.asyncio
+    async def test_grant_site_permission_raises_on_403(self) -> None:
+        client = SharepointClient(
+            FakeCredential(),
+            ["scope"],
+            http=httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(403))),
+        )
+
+        with pytest.raises(AuthenticationError):
+            await client.grant_site_permission("site1", "app-client-id", ["read"])
+
+    @pytest.mark.asyncio
     async def test_list_subscriptions_paginates(self) -> None:
         pages = {
             "https://graph.microsoft.com/v1.0/subscriptions": httpx.Response(

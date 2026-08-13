@@ -40,6 +40,10 @@ config = ConnectorConfig(
   narrower, site-specific) Graph application permissions. All three of `tenant_id`,
   `client_id`, `client_secret` are required; the connector raises `ConfigurationError`
   at `connect()` time if any are missing.
+
+  Prefer `Sites.Selected` over `Sites.Read.All` where possible — see "Narrowing access
+  with `Sites.Selected`" below. It's the same `client_credentials` auth either way;
+  only the app registration's Graph permission and a one-time per-site grant differ.
 - **`options.url`** — a SharePoint *sharing link* (the kind you get from the "Copy link"
   button), not a REST/Graph URL. The connector parses it with
   `SharepointClient.parse_sharing_url` to recover the drive's display name and the
@@ -54,6 +58,46 @@ keyed by `config.name` if set, falling back to the raw sharing URL otherwise (se
 `_sync_key`). Set `name` explicitly and keep it stable — if the sharing URL ever changes
 (a folder gets renamed, the link gets regenerated) while `name` doesn't, the connector
 keeps resuming from the same state instead of silently starting a fresh sync under a new key.
+
+## Narrowing access with `Sites.Selected`
+
+`Sites.Read.All` (application permission) grants the app read access to *every*
+SharePoint site in the tenant, and needs a Global/SharePoint admin to consent to it
+once, up front. `Sites.Selected` is a narrower alternative: on its own it grants the
+app access to **no** sites — each site must be individually authorized via a separate
+Graph call, made once per site:
+
+```python
+POST https://graph.microsoft.com/v1.0/sites/{site-id}/permissions
+{
+  "roles": ["read"],
+  "grantedToIdentities": [{"application": {"id": "<app-client-id>", "displayName": "..."}}]
+}
+```
+
+`SharepointClient.grant_site_permission(site_id, app_client_id, roles)` wraps this
+call. The catch: it must be made with a **delegated** credential (from an interactive
+sign-in by that site's owner, or a SharePoint admin) — not the connector's own
+`ClientSecretCredential`, which has no standing to grant permissions on a site it can't
+access yet. In practice this means constructing a second, throwaway `SharepointClient`
+around a credential object wrapping the delegated access token, using it for this one
+call, then discarding it — the app's regular `client_credentials` config (`tenant_id`/
+`client_id`/`client_secret`) is untouched and keeps being used for every other call
+this connector makes.
+
+This library only exposes the primitive (`grant_site_permission`); driving the actual
+one-time consent flow — building the Microsoft authorize URL, handling the redirect
+callback, exchanging the code for a delegated token — is left to the caller, since it
+usually needs to be wired into whatever UI lets an admin manage connector configs (e.g.
+an "Authorize site" button). `Sites.FullControl.All` (delegated) is the permission
+believed to be required to call the grant endpoint itself — confirm against current
+Microsoft Graph docs, since Microsoft has moved this requirement before.
+
+Once granted, `Sites.Read.All`/`Sites.ReadWrite.All` can be removed from the app
+registration entirely — `Sites.Selected` plus the per-site grants above are all this
+connector needs going forward. A site that was never granted, or whose grant was
+revoked, simply 403s on `connect()`/`validate()`, surfaced as
+`AuthenticationError`/`ConfigurationError` like any other credential problem.
 
 ## Using it
 

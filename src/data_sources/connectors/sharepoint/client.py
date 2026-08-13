@@ -207,6 +207,32 @@ class SharepointClient:
         )
         self._raise_for_status(response)
 
+    async def grant_site_permission(
+        self, site_id: str, app_client_id: str, roles: list[str]
+    ) -> dict[str, Any]:
+        """Grant `app_client_id` the given `Sites.Selected` role(s) on `site_id`.
+
+        This is a one-time, per-site call, meant to run with a *delegated* credential
+        obtained from an interactive sign-in by that site's owner (or a SharePoint
+        admin) — not with the app's own `ClientSecretCredential`, which is what every
+        other method on this client is normally used with. Construct a throwaway
+        `SharepointClient` wrapping that delegated token's credential just for this
+        call; see docs/sharepoint.md for the full one-time-grant flow this supports.
+        """
+        body = {
+            "roles": roles,
+            "grantedToIdentities": [
+                {"application": {"id": app_client_id, "displayName": app_client_id}}
+            ],
+        }
+        response = await self._http.post(
+            f"{self.BASE_URL}/sites/{site_id}/permissions",
+            json=body,
+            headers=await self._auth_header(),
+        )
+        self._raise_for_status(response)
+        return dict(response.json())
+
     @staticmethod
     def _format_expiration(expiration: datetime) -> str:
         """Graph expects an ISO 8601 UTC timestamp; `Z` is the only suffix it accepts."""
