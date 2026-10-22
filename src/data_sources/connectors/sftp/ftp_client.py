@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import posixpath
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -59,6 +60,14 @@ class FTPClient:
             self.logger.warning(f"FTP path not found: {path}")
             raise NotFoundError(f"FTP path not found: {path}") from exc
         return _to_entry(path, info)
+
+    async def lstat(self, path: str) -> RemoteEntry:
+        """FTP doesn't expose symlinks as such — the same as `stat`."""
+        return await self.stat(path)
+
+    async def realpath(self, path: str) -> str:
+        """FTP doesn't expose symlinks as such — `path`, normalized."""
+        return posixpath.normpath(path)
 
     async def listdir(self, path: str) -> AsyncIterator[RemoteEntry]:
         try:

@@ -48,8 +48,9 @@ config = ConnectorConfig(
   button), not a REST/Graph URL. The connector parses it with
   `SharepointClient.parse_sharing_url` to recover the drive's display name and the
   folder path within it; everything under that folder is in scope.
-- **`options.excluded_paths`** — path prefixes, relative to the folder above, to skip
-  during `list()` and `sync()` (e.g. `["Archive"]` skips `Reports/Q1/Archive/...`).
+- **`options.excluded_paths`**: folders, relative to the folder above, to skip in
+  `list()` and `sync()`, matched by whole path segment. `["Archive"]` skips
+  `Reports/Q1/Archive/...` but not `Reports/Q1/Archive2025/...`.
 
 ### Why set `name`
 
@@ -111,14 +112,32 @@ from data_sources.store import init_store, init_connector
 store = await init_store()  # see store.md — defaults to a local SQLite file
 connector = await init_connector(config, store)  # creates its tables, sets connector.store
 
-await connector.connect()  # acquires the Graph credential + resolves site/drive ids
+await connector.connect()  # acquires the Graph credential + resolves site, drive and folder ids
 await connector.validate()  # True if the configured folder is reachable
 
 async for item in connector.list(recursive=True):
     print(item.name)
 
+async for item in connector.list("Invoices/2026"):  # one level, subfolders included
+    ...
+
 await connector.close()
 ```
+
+`list(path)` takes `path` relative to the sharing link's folder. A `..` segment raises
+`NotFoundError`. `list(recursive=True)` and `sync()` return documents only;
+`list(recursive=False)` also returns the subfolders, as `ItemType.FOLDER`.
+
+### The folder is a boundary
+
+`get_metadata(item_id)` and `download(item)` refuse (with `NotFoundError`) any item whose
+Graph path doesn't lie under the sharing link's folder, whatever id the caller passes.
+`download` checks `item.id` again rather than trusting the `Item` it's given. Excluded
+and deleted items are refused the same way.
+
+The comparison is on the full path from the drive's top, segment by segment and
+case-insensitively, as SharePoint paths are. It never relies on the folder's name alone,
+since another folder in the drive can share that name.
 
 ### Incremental sync
 

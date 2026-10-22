@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import posixpath
 import stat as stat_module
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -60,6 +61,8 @@ class FakeRemoteClient:
         self.downloaded: list[str] = []
         self._tree: dict[str, list[RemoteEntry]] = {}
         self._walked: list[RemoteEntry] = []
+        #: path -> where the symlink at it points (absolute), for `lstat`/`realpath`.
+        self.links: dict[str, str] = {}
 
     def set_children(self, path: str, entries: list[RemoteEntry]) -> None:
         self._tree[path] = entries
@@ -69,6 +72,18 @@ class FakeRemoteClient:
 
     async def stat(self, path: str) -> RemoteEntry:
         return _entry(path)
+
+    async def lstat(self, path: str) -> RemoteEntry:
+        if path in self.links:
+            return _entry(path, permissions=stat_module.S_IFLNK | 0o777)
+        return _entry(path)
+
+    async def realpath(self, path: str) -> str:
+        resolved = posixpath.normpath(path)
+        for link, target in self.links.items():
+            if resolved == link or resolved.startswith(f"{link}/"):
+                resolved = target + resolved[len(link) :]
+        return resolved
 
     async def listdir(self, path: str) -> AsyncIterator[RemoteEntry]:
         for entry in self._tree.get(path, []):
@@ -240,6 +255,83 @@ class TestList:
         items = [item async for item in connector.list("/data/sub")]
 
         assert [item.id for item in items] == ["/data/sub/c.txt"]
+
+
+class TestBoundary:
+    """The URL's path is a boundary — for relative and absolute paths, and through symlinks."""
+
+    @pytest.mark.asyncio
+    async def test_list_path_is_relative_to_the_root(self) -> None:
+        connector, fake_client = make_connector()
+        fake_client.set_children("/data/sub", [_entry("/data/sub/c.txt")])
+
+        items = [item async for item in connector.list("sub")]
+
+        assert [item.id for item in items] == ["/data/sub/c.txt"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", ["../etc", "/etc", "/data/../etc", "/database"])
+    async def test_list_refuses_a_path_outside(self, path: str) -> None:
+        connector, _ = make_connector()
+
+        with pytest.raises(NotFoundError):
+            _ = [item async for item in connector.list(path)]
+
+    @pytest.mark.asyncio
+    async def test_list_refuses_a_folder_linked_outside(self) -> None:
+        connector, fake_client = make_connector()
+        fake_client.links = {"/data/escape": "/etc"}
+
+        with pytest.raises(NotFoundError):
+            _ = [item async for item in connector.list("escape")]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "item_id", ["/etc/passwd", "/data/../etc/passwd", "/data/Archive/a.txt"]
+    )
+    async def test_get_metadata_refuses_paths_outside_or_excluded(self, item_id: str) -> None:
+        connector, _ = make_connector(excluded_paths=["Archive"])
+
+        with pytest.raises(NotFoundError):
+            await connector.get_metadata(item_id)
+
+    @pytest.mark.asyncio
+    async def test_excluded_paths_match_whole_segments(self) -> None:
+        connector, _ = make_connector(excluded_paths=["Archive"])
+
+        assert (await connector.get_metadata("/data/Archive2025/a.txt")).name == "a.txt"
+
+    @pytest.mark.asyncio
+    async def test_get_metadata_refuses_symlinks_and_linked_folders(self) -> None:
+        connector, fake_client = make_connector()
+        fake_client.links = {"/data/link.txt": "/etc/passwd", "/data/escape": "/etc"}
+
+        with pytest.raises(NotFoundError):
+            await connector.get_metadata("/data/link.txt")
+        with pytest.raises(NotFoundError):
+            await connector.get_metadata("/data/escape/passwd")
+
+    @pytest.mark.asyncio
+    async def test_download_refuses_a_built_item_outside(self) -> None:
+        connector, fake_client = make_connector()
+
+        with pytest.raises(NotFoundError):
+            _ = [
+                chunk
+                async for chunk in connector.download(
+                    Item(id="/etc/passwd", name="passwd", type=ItemType.FILE)
+                )
+            ]
+        assert fake_client.downloaded == []
+
+    @pytest.mark.asyncio
+    async def test_a_root_that_is_itself_a_link_still_works(self) -> None:
+        connector, fake_client = make_connector()
+        fake_client.links = {"/data": "/srv/data"}
+        fake_client.set_children("/data", [_entry("/data/a.txt")])
+
+        assert [item.id async for item in connector.list()] == ["/data/a.txt"]
+        assert (await connector.get_metadata("/data/a.txt")).name == "a.txt"
 
 
 class TestSync:

@@ -23,9 +23,10 @@ from data_sources.connectors.google_drive.items import (
     parse_datetime,
     to_item,
 )
-from data_sources.connectors.google_drive.scope import Ancestry, is_excluded, join, walk
+from data_sources.connectors.google_drive.scope import Ancestry, walk
 from data_sources.connectors.google_drive.state import FolderUpdate
 from data_sources.core.models import Change, ChangeType, SyncCursor
+from data_sources.core.paths import is_excluded, join
 
 
 class DriveIndex(Protocol):

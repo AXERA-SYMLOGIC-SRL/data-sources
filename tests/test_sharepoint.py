@@ -263,6 +263,147 @@ class TestList:
         assert [item.id for item in items] == ["1"]
 
 
+class TestBoundary:
+    """The sharing URL's folder is a boundary — by full path, never by the root folder's
+    name alone, and whatever id or path the caller passes."""
+
+    @staticmethod
+    def _serve(fake_client: FakeSharepointClient, raw: dict[str, Any]) -> None:
+        async def fake_get_item_by_id(drive_id: str, item_id: str) -> dict[str, Any]:
+            return raw
+
+        fake_client.get_item_by_id = fake_get_item_by_id  # type: ignore[method-assign]
+
+    @pytest.mark.asyncio
+    async def test_get_metadata_places_an_item_inside(self) -> None:
+        connector, fake_client = make_connector()
+        self._serve(
+            fake_client,
+            _drive_item("1", "a.pdf", parent_path="/drives/drive1/root:/Reports/Q1/Sub"),
+        )
+
+        item = await connector.get_metadata("1")
+
+        assert item.path == "Sub"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "parent_path",
+        [
+            "/drives/drive1/root:/Other/Q1",  # a folder elsewhere with the root's name
+            "/drives/drive1/root:/Reports",  # above the root
+            "/drives/drive1/root:",  # the drive's top
+            "",  # Graph didn't say
+        ],
+    )
+    async def test_get_metadata_refuses_what_is_not_under_the_root(self, parent_path: str) -> None:
+        connector, fake_client = make_connector()
+        raw = _drive_item("1", "secret.pdf", parent_path=parent_path)
+        self._serve(fake_client, raw)
+
+        with pytest.raises(NotFoundError):
+            await connector.get_metadata("1")
+
+    @pytest.mark.asyncio
+    async def test_get_metadata_matches_paths_case_insensitively_and_decoded(self) -> None:
+        connector, fake_client = make_connector()
+        self._serve(
+            fake_client,
+            _drive_item("1", "a.pdf", parent_path="/drives/drive1/root:/reports/q1/My%20Docs"),
+        )
+
+        assert (await connector.get_metadata("1")).path == "My Docs"
+
+    @pytest.mark.asyncio
+    async def test_get_metadata_refuses_excluded_and_deleted_items(self) -> None:
+        connector, fake_client = make_connector(excluded_paths=["Archive"])
+        self._serve(
+            fake_client,
+            _drive_item("1", "old.pdf", parent_path="/drives/drive1/root:/Reports/Q1/Archive/2025"),
+        )
+        with pytest.raises(NotFoundError):
+            await connector.get_metadata("1")
+
+        self._serve(fake_client, _drive_item("2", "gone.pdf", deleted=True))
+        with pytest.raises(NotFoundError):
+            await connector.get_metadata("2")
+
+    @pytest.mark.asyncio
+    async def test_excluded_paths_match_whole_segments(self) -> None:
+        connector, fake_client = make_connector(excluded_paths=["Archive"])
+        self._serve(
+            fake_client,
+            _drive_item("1", "a.pdf", parent_path="/drives/drive1/root:/Reports/Q1/Archive2025"),
+        )
+
+        assert (await connector.get_metadata("1")).path == "Archive2025"
+
+    @pytest.mark.asyncio
+    async def test_get_metadata_returns_the_root_folder_itself(self) -> None:
+        connector, fake_client = make_connector()
+        connector._root_item_id = "root-item"
+        self._serve(
+            fake_client,
+            _drive_item("root-item", "Q1", parent_path="/drives/drive1/root:/Reports", folder=True),
+        )
+
+        assert (await connector.get_metadata("root-item")).type == ItemType.FOLDER
+
+    @pytest.mark.asyncio
+    async def test_download_refuses_a_built_item_outside(self) -> None:
+        connector, fake_client = make_connector()
+        self._serve(fake_client, _drive_item("1", "x.pdf", parent_path="/drives/drive1/root:/HR"))
+
+        with pytest.raises(NotFoundError):
+            _ = [
+                chunk
+                async for chunk in connector.download(
+                    Item(id="1", name="x.pdf", type=ItemType.FILE)
+                )
+            ]
+        assert fake_client.downloaded == []
+
+    @pytest.mark.asyncio
+    async def test_list_path_is_relative_to_the_root_and_cannot_climb(self) -> None:
+        connector, fake_client = make_connector()
+        listed: list[str] = []
+
+        async def fake_list_children(
+            drive_id: str, item_path: str
+        ) -> AsyncIterator[dict[str, Any]]:
+            listed.append(item_path)
+            return
+            yield
+
+        fake_client.list_children = fake_list_children  # type: ignore[method-assign,assignment]
+
+        _ = [item async for item in connector.list("Archive/2025")]
+        assert listed == ["Reports/Q1/Archive/2025"]
+
+        with pytest.raises(NotFoundError):
+            _ = [item async for item in connector.list("../HR")]
+
+    @pytest.mark.asyncio
+    async def test_one_level_includes_subfolders_but_not_excluded_ones(self) -> None:
+        connector, fake_client = make_connector(excluded_paths=["Archive"])
+
+        async def fake_list_children(
+            drive_id: str, item_path: str
+        ) -> AsyncIterator[dict[str, Any]]:
+            yield _drive_item("1", "a.pdf")
+            yield _drive_item("2", "Sub", folder=True)
+            yield _drive_item("3", "Archive", folder=True)
+
+        fake_client.list_children = fake_list_children  # type: ignore[method-assign,assignment]
+
+        items = [item async for item in connector.list()]
+
+        assert [(item.id, item.type) for item in items] == [
+            ("1", ItemType.FILE),
+            ("2", ItemType.FOLDER),
+        ]
+
+
 class TestSync:
     @pytest.mark.asyncio
     async def test_classifies_created_updated_deleted_and_carries_cursor(self) -> None:
@@ -646,6 +787,25 @@ class TestSharepointClientAgainstGraph:
         site_id = await client.get_site_id("https://contoso.sharepoint.com/sites/Finance/whatever")
 
         assert site_id == "site1"
+
+    @pytest.mark.asyncio
+    async def test_get_folder_addresses_a_path_or_the_drive_root(self) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(200, json={"id": "folder"})
+
+        client = SharepointClient(
+            FakeCredential(),
+            ["scope"],
+            http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+
+        await client.get_folder("drive1", "Reports/Q1")
+        await client.get_folder("drive1", "/")
+
+        assert seen == ["/v1.0/drives/drive1/root:/Reports/Q1:", "/v1.0/drives/drive1/root"]
 
     @pytest.mark.asyncio
     async def test_get_delta_paginates_and_surfaces_delta_link_on_last_page_only(self) -> None:

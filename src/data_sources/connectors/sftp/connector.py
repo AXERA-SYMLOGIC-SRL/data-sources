@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import posixpath
+import stat as stat_module
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlparse
@@ -12,9 +14,15 @@ from data_sources.connectors.sftp.ftp_client import FTPClient
 from data_sources.connectors.sftp.models import SFTPItemRecord, SFTPSyncState
 from data_sources.connectors.sftp.sftp_client import SFTPClient
 from data_sources.core.connector import Connector
-from data_sources.core.exceptions import ConfigurationError, ConnectionError, DataSourceError
+from data_sources.core.exceptions import (
+    ConfigurationError,
+    ConnectionError,
+    DataSourceError,
+    NotFoundError,
+)
 from data_sources.core.logging import logger
 from data_sources.core.models import Change, ChangeType, Item, ItemType, SyncCursor
+from data_sources.core.paths import is_excluded, relative_path
 from data_sources.core.registry import register_connector
 
 #: Scheme -> default port, and the set of schemes `options.url` may use.
@@ -38,6 +46,10 @@ class SFTPConnector(Connector):
     `RemoteClient.walk`, which skips directories (and, for SFTP, symlinks and other
     special files). `list(recursive=False)` browses one directory level and includes
     subfolders.
+
+    The URL's path is a boundary: `list(path)` takes `path` relative to it (or absolute
+    and inside it), and `get_metadata`/`download` refuse a path outside it, an excluded
+    one, a symlink, or one that only reaches it through a linked folder (`NotFoundError`).
 
     Every item `sync_in_background` sees is indexed locally, so a caller that only kept a
     `Change.item_id` (here, the file's absolute path) can later call `get_item(item_id)`
@@ -72,6 +84,7 @@ class SFTPConnector(Connector):
         self._root_path = parsed.path or "/"
         self._excluded_paths = tuple(config.options.get("excluded_paths", ()))
         self._client: RemoteClient | None = None
+        self._real_root: str | None = None
         self.logger = logger.getChild("sftp.connector")
 
     @property
@@ -124,7 +137,9 @@ class SFTPConnector(Connector):
     async def list(
         self, path: str | None = None, *, recursive: bool = False
     ) -> AsyncIterator[Item]:
-        item_path = path if path is not None else self._root_path
+        item_path = await self._inside(self._resolve(path))
+        if self._is_excluded_path(item_path):
+            return
 
         if recursive:
             async for entry in self.client.walk(item_path):
@@ -138,12 +153,46 @@ class SFTPConnector(Connector):
                 yield self._to_item(entry)
 
     async def get_metadata(self, item_id: str) -> Item:
-        entry = await self.client.stat(item_id)
+        """`item_id`'s (an absolute path's) metadata, refused (`NotFoundError`) unless it is
+        a non-excluded file or folder under the root — symlinks included: a link is refused,
+        and so is a path whose resolved location (through any linked folder) leaves it."""
+        path = await self._inside(self._resolve(item_id))
+        if self._is_excluded_path(path):
+            raise NotFoundError(f"{item_id!r} is not inside the connected folder")
+        entry = await self.client.lstat(path)
+        if entry.permissions is not None and stat_module.S_ISLNK(entry.permissions):
+            raise NotFoundError(f"{item_id!r} is a symlink")
         return self._to_item(entry)
 
     async def download(self, item: Item) -> AsyncIterator[bytes]:
-        async for chunk in self.client.download(item.id):
+        # Checked again by id, whatever `item` says: the caller may have built it.
+        checked = await self.get_metadata(item.id)
+        async for chunk in self.client.download(checked.id):
             yield chunk
+
+    def _resolve(self, path: str | None) -> str:
+        """A caller's path as an absolute one under the root — relative to the root, or
+        absolute and inside it — normalized; `NotFoundError` when it leads out."""
+        root = posixpath.normpath(self._root_path)
+        if path is None or not path.strip():
+            return root
+        if path.startswith("/"):
+            resolved = posixpath.normpath(path)
+        else:
+            relative = relative_path(path)
+            resolved = posixpath.join(root, relative) if relative else root
+        if not _under(resolved, root):
+            raise NotFoundError(f"path {path!r} must stay inside the connected folder")
+        return resolved
+
+    async def _inside(self, path: str) -> str:
+        """`path`, once the server confirms its resolved location (symlinks followed) is
+        still under the root's own resolved location."""
+        if self._real_root is None:
+            self._real_root = await self.client.realpath(self._root_path)
+        if not _under(await self.client.realpath(path), self._real_root):
+            raise NotFoundError(f"path {path!r} leads outside the connected folder")
+        return path
 
     async def sync(self, cursor: SyncCursor | None = None) -> AsyncIterator[Change]:
         previous_snapshot: dict[str, str] = (
@@ -240,13 +289,15 @@ class SFTPConnector(Connector):
             await self._client.close()
 
     def _is_excluded(self, entry: RemoteEntry) -> bool:
-        if not self._excluded_paths:
+        return self._is_excluded_path(entry.path)
+
+    def _is_excluded_path(self, path: str) -> bool:
+        """Whether the absolute `path` is, or sits inside, an excluded folder — matched by
+        whole segments relative to the root."""
+        root = posixpath.normpath(self._root_path)
+        if not self._excluded_paths or not _under(path, root) or path == root:
             return False
-        root = self._root_path.rstrip("/")
-        if not entry.path.startswith(f"{root}/"):
-            return False
-        relative = entry.path[len(root) + 1 :]
-        return any(relative.startswith(excluded) for excluded in self._excluded_paths)
+        return is_excluded(posixpath.relpath(path, root), self._excluded_paths)
 
     def _to_item(self, entry: RemoteEntry) -> Item:
         return Item(
@@ -261,6 +312,10 @@ class SFTPConnector(Connector):
             modified_at=entry.mtime,
             metadata=_metadata(entry),
         )
+
+
+def _under(path: str, root: str) -> bool:
+    return root == "/" or path == root or path.startswith(f"{root.rstrip('/')}/")
 
 
 def _metadata(entry: RemoteEntry) -> dict[str, Any]:

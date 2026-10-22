@@ -137,9 +137,18 @@ class SharepointClient:
             f"{self.BASE_URL}/sites/{site_id}/drives/{drive_id}/root:/{item_path}:/"
         )
 
+    @staticmethod
+    def _anchor(item_path: str) -> str:
+        """Graph's address for the folder at `item_path` — the drive's own `root` for none."""
+        return f"root:/{item_path.strip('/')}:" if item_path.strip("/") else "root"
+
+    async def get_folder(self, drive_id: str, item_path: str) -> dict[str, Any]:
+        return await self.get_json(f"{self.BASE_URL}/drives/{drive_id}/{self._anchor(item_path)}")
+
     def list_children(self, drive_id: str, item_path: str) -> AsyncIterator[dict[str, Any]]:
-        anchor = f"root:/{item_path}:" if item_path and item_path != "/" else "root"
-        return self._paginate(f"{self.BASE_URL}/drives/{drive_id}/{anchor}/children")
+        return self._paginate(
+            f"{self.BASE_URL}/drives/{drive_id}/{self._anchor(item_path)}/children"
+        )
 
     def delta_url(self, site_id: str, drive_id: str, item_path: str) -> str:
         return f"{self.BASE_URL}/sites/{site_id}/drives/{drive_id}/root:/{item_path}:/delta"

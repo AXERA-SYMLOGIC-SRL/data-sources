@@ -87,6 +87,28 @@ class SFTPClient:
             raise DataSourceError(f"SFTP error for {path}: {exc}") from exc
         return _to_entry(path, attrs)
 
+    async def lstat(self, path: str) -> RemoteEntry:
+        try:
+            attrs = await self._sftp.lstat(path)
+        except asyncssh.SFTPNoSuchFile as exc:
+            self.logger.warning(f"SFTP path not found: {path}")
+            raise NotFoundError(f"SFTP path not found: {path}") from exc
+        except asyncssh.SFTPError as exc:
+            self.logger.error(f"SFTP error for {path}: {exc}")
+            raise DataSourceError(f"SFTP error for {path}: {exc}") from exc
+        return _to_entry(path, attrs)
+
+    async def realpath(self, path: str) -> str:
+        try:
+            resolved = await self._sftp.realpath(path)
+        except asyncssh.SFTPNoSuchFile as exc:
+            self.logger.warning(f"SFTP path not found: {path}")
+            raise NotFoundError(f"SFTP path not found: {path}") from exc
+        except asyncssh.SFTPError as exc:
+            self.logger.error(f"SFTP error resolving {path}: {exc}")
+            raise DataSourceError(f"SFTP error resolving {path}: {exc}") from exc
+        return resolved.decode("utf-8") if isinstance(resolved, bytes) else str(resolved)
+
     async def listdir(self, path: str) -> AsyncIterator[RemoteEntry]:
         try:
             names = await self._sftp.readdir(path)

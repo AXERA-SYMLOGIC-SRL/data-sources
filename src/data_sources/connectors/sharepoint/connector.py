@@ -5,6 +5,7 @@ import secrets
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import unquote
 
 from azure.identity.aio import ClientSecretCredential
 
@@ -16,7 +17,12 @@ from data_sources.connectors.sharepoint.models import (
     SharePointWebhookState,
 )
 from data_sources.core.connector import Connector
-from data_sources.core.exceptions import ConfigurationError, ConnectionError, DataSourceError
+from data_sources.core.exceptions import (
+    ConfigurationError,
+    ConnectionError,
+    DataSourceError,
+    NotFoundError,
+)
 from data_sources.core.logging import logger
 from data_sources.core.models import (
     Change,
@@ -28,6 +34,7 @@ from data_sources.core.models import (
     Subscription,
     SyncCursor,
 )
+from data_sources.core.paths import is_excluded, join, relative_path
 from data_sources.core.registry import register_connector
 
 GRAPH_SCOPES = ["https://graph.microsoft.com/.default"]
@@ -50,10 +57,16 @@ class SharePointConnector(Connector):
     Addressed via `config.options["url"]`, a SharePoint sharing link
     (`.../AllItems.aspx?id=/sites/.../Shared Documents/some/folder`) naming a drive and,
     optionally, a subfolder to scope the connector to. `config.options["excluded_paths"]`
-    is an optional list of path prefixes (relative to that folder) to skip.
+    is an optional list of folders (relative to that folder) to skip, matched by whole
+    path segments.
 
-    Folders are not surfaced as `Item`s — Graph's delta feed intermixes folder and file
-    entries, but this connector only tracks documents.
+    That folder is a boundary: `get_metadata` and `download` refuse an item whose Graph
+    path doesn't lie under it (`NotFoundError`), whatever id the caller passes, and
+    `list(path)` takes `path` relative to it, refusing `..`.
+
+    `list(recursive=True)` and `sync()` surface documents only — Graph's delta feed
+    intermixes folder and file entries; `list(recursive=False)` browses one folder level
+    and includes its subfolders.
 
     Every item `sync_in_background` sees is indexed locally, so a caller that only kept a
     `Change.item_id` can later call `get_item(item_id)` to recover the `Item` (and then
@@ -78,6 +91,7 @@ class SharePointConnector(Connector):
         self._drive_name, self._root_path = SharepointClient.parse_sharing_url(url)
         self._site_id: str | None = None
         self._drive_id: str | None = None
+        self._root_item_id: str | None = None
         self._client: SharepointClient | None = None
         self.logger = logger.getChild("sharepoint.connector")
 
@@ -126,6 +140,8 @@ class SharePointConnector(Connector):
         self._site_id, self._drive_id = await self._client.resolve_drive(
             self._url, self._drive_name
         )
+        root = await self._client.get_folder(self._drive_id, self._root_path)
+        self._root_item_id = str(root["id"])
 
     async def validate(self) -> bool:
         try:
@@ -140,7 +156,10 @@ class SharePointConnector(Connector):
     async def list(
         self, path: str | None = None, *, recursive: bool = False
     ) -> AsyncIterator[Item]:
-        item_path = path if path is not None else self._root_path
+        relative = relative_path(path)
+        if is_excluded(relative, self._excluded_paths):
+            return
+        item_path = self._drive_path(relative)
 
         if recursive:
             delta_url = self.client.delta_url(
@@ -152,15 +171,29 @@ class SharePointConnector(Connector):
                 yield self._to_item(raw)
         else:
             async for raw in self.client.list_children(self._resolved_drive_id, item_path):
-                if self._skip(raw):
+                if "deleted" in raw or self._is_excluded(raw):
+                    continue
+                if "folder" in raw and is_excluded(
+                    join(self._relative_path(raw), raw.get("name", "")), self._excluded_paths
+                ):
                     continue
                 yield self._to_item(raw)
 
     async def get_metadata(self, item_id: str) -> Item:
+        """`item_id`'s metadata, refused (`NotFoundError`) unless it is the root folder or
+        a live, non-excluded item whose Graph path lies under it."""
         raw = await self.client.get_item_by_id(self._resolved_drive_id, item_id)
+        if self._root_item_id is not None and raw.get("id") == self._root_item_id:
+            return self._to_item(raw)
+        parent = self._parent_path(raw)
+        if parent is None or "deleted" in raw or is_excluded(parent, self._excluded_paths):
+            raise NotFoundError(f"{item_id!r} is not inside the connected folder")
         return self._to_item(raw)
 
     async def download(self, item: Item) -> AsyncIterator[bytes]:
+        # Checked again by id, whatever `item` says: the caller may have kept it from before
+        # the file moved, or built it.
+        await self.get_metadata(item.id)
         async for chunk in self.client.download(self._resolved_drive_id, item.id):
             yield chunk
 
@@ -326,40 +359,44 @@ class SharePointConnector(Connector):
     def _skip(self, raw: dict[str, Any]) -> bool:
         return "folder" in raw or "deleted" in raw or self._is_excluded(raw)
 
-    @property
-    def _root_anchor(self) -> str:
-        """The last path segment Graph's `parentReference.path` uses for our root folder.
+    def _drive_path(self, relative: str) -> str:
+        """The drive path of the folder at `relative` (inside the root), as Graph's
+        `root:/{path}:` addressing takes it."""
+        if not relative:
+            return self._root_path
+        root = self._root_path.strip("/")
+        return f"{root}/{relative}" if root else relative
 
-        Graph paths look like `/drives/{id}/root:/Reports/Q1/Archive` — never the drive's
-        display name — so excluded-path matching and `_relative_path` both anchor on the
-        root folder's own name (or the literal `root:` segment when the connector is
-        scoped to the drive root).
+    def _parent_path(self, raw: dict[str, Any]) -> str | None:
+        """The item's parent folder relative to the root, or `None` when its Graph path
+        doesn't lie under the root (or Graph didn't say where it is).
+
+        Graph's `parentReference.path` looks like `/drives/{id}/root:/Reports/Q1/Archive` —
+        a drive-internal prefix up to the literal `root:` segment, then the path from the
+        drive's top. It's compared with the root's own path segment by segment (SharePoint
+        paths are case-insensitive), never by the root folder's name alone, which another
+        folder in the drive could share.
         """
-        if self._root_path in ("", "/"):
-            return "root:"
-        return self._root_path.rstrip("/").rsplit("/", 1)[-1]
+        raw_path = raw.get("parentReference", {}).get("path")
+        if not raw_path:
+            return None
+        _, anchor, after = unquote(str(raw_path)).partition("root:")
+        if not anchor:
+            return None
+        segments = [segment for segment in after.split("/") if segment]
+        root = [segment for segment in self._root_path.split("/") if segment]
+        if [s.casefold() for s in segments[: len(root)]] != [s.casefold() for s in root]:
+            return None
+        return "/".join(segments[len(root) :])
 
     def _relative_path(self, raw: dict[str, Any]) -> str:
-        """The item's parent path relative to our configured root, e.g. `Q2/Archive`.
-
-        Graph's `parentReference.path` is never client-facing — it's shaped like
-        `/drives/{id}/root:/Reports/Q1/Archive`, prefixed with the drive id and the
-        literal `root:` segment (see `_root_anchor`). Everything up to and including
-        that anchor is internal plumbing, so it's stripped here before the path is
-        surfaced as an `Item`/`Record` path.
-        """
-        raw_path: str = raw.get("parentReference", {}).get("path", "")
-        segments = raw_path.split("/")
-        anchor = self._root_anchor
-        if anchor not in segments:
-            return raw_path.lstrip("/")
-        return "/".join(segments[segments.index(anchor) + 1 :])
+        """The parent path of an item listed or synced from under the root — inside by
+        construction, so when Graph omits `parentReference.path` (delta responses may) it
+        is taken to be the root itself."""
+        return self._parent_path(raw) or ""
 
     def _is_excluded(self, raw: dict[str, Any]) -> bool:
-        if not self._excluded_paths:
-            return False
-        relative = self._relative_path(raw)
-        return any(relative.startswith(excluded) for excluded in self._excluded_paths)
+        return is_excluded(self._relative_path(raw), self._excluded_paths)
 
     def _to_item(self, raw: dict[str, Any]) -> Item:
         file_info = raw.get("file", {})

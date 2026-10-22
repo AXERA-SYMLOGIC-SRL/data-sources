@@ -54,8 +54,9 @@ config = ConnectorConfig(
   asyncssh's host key verification. Leaving it unset disables host key checking
   entirely, which is convenient for a first connection but means a
   machine-in-the-middle isn't detected — set it once you know the server's host key.
-- **`options.excluded_paths`** — path prefixes, relative to the url's path, to skip during
-  `list()` and `sync()` (e.g. `["archive"]` skips `reports/archive/...`).
+- **`options.excluded_paths`**: folders, relative to the url's path, to skip in `list()`
+  and `sync()`, matched by whole path segment. `["archive"]` skips `reports/archive/...`
+  but not `reports/archive2025/...`.
 
 FTP entries never carry a `permissions` value in `Item.metadata` (unlike SFTP, whose
 POSIX mode bits are always available) — FTP's MLSD/LIST facts don't reliably expose them
@@ -93,8 +94,21 @@ await connector.close()
 Only regular files are surfaced by `list(recursive=True)` and `sync()` — directories are
 skipped while walking the tree (for SFTP, so are symlinks and other special files).
 `list(recursive=False)` browses a single directory level and includes subfolders
-(`ItemType.FOLDER`), useful for building a picker UI; pass `path` to browse anywhere
-under `root_path`, not just the root.
+(`ItemType.FOLDER`), useful for building a picker UI. Pass `path` to browse anywhere
+under `root_path`, either relative to it (`"invoices/2026"`) or absolute and inside it
+(`"/reports/invoices/2026"`).
+
+### `root_path` is a boundary
+
+`list(path)`, `get_metadata(item_id)` and `download(item)` refuse (with `NotFoundError`)
+any path that leads outside `root_path`. That covers `..` segments, an absolute path
+elsewhere, and a path in an excluded folder. Symlinks are covered too:
+- `get_metadata` refuses a path that is itself a symlink;
+- every path is resolved on the server (`realpath`) and must still lie under the
+  resolved `root_path`, so a linked folder can't lead out.
+
+`download` checks `item.id` again rather than trusting the `Item` it's given. FTP exposes
+no symlinks, so there the check is on the normalized path alone.
 
 ### Incremental sync
 

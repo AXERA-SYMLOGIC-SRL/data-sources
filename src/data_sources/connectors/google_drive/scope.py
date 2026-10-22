@@ -15,6 +15,7 @@ from data_sources.connectors.google_drive.client import (
     GoogleDriveClient,
 )
 from data_sources.core.exceptions import DataSourceError, NotFoundError
+from data_sources.core.paths import is_excluded, join
 
 #: How many folders up an item's ancestry is followed before it's treated as outside.
 MAX_DEPTH = 100
@@ -29,21 +30,6 @@ def parse_folder(raw: str) -> str | None:
     if match:
         return match.group(1)
     return raw if raw == "root" or re.fullmatch(r"[a-zA-Z0-9_-]{10,}", raw) else None
-
-
-def join(path: str, name: str) -> str:
-    return f"{path}/{name}" if path else name
-
-
-def is_excluded(path: str, excluded: Sequence[str]) -> bool:
-    """Whether the folder at `path` (relative to the root) is, or sits inside, one of the
-    `excluded` folders — matched by whole path segments, so `Archive` doesn't exclude
-    `Archive2025`."""
-    return any(
-        path == prefix or path.startswith(f"{prefix}/")
-        for prefix in (excluded_path.strip("/") for excluded_path in excluded)
-        if prefix
-    )
 
 
 class Ancestry:

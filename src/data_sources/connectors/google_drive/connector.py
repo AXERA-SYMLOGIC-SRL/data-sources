@@ -27,7 +27,6 @@ from data_sources.connectors.google_drive.models import (
 )
 from data_sources.connectors.google_drive.scope import (
     Ancestry,
-    is_excluded,
     parse_folder,
     resolve_path,
     walk,
@@ -52,6 +51,7 @@ from data_sources.core.models import (
     Subscription,
     SyncCursor,
 )
+from data_sources.core.paths import is_excluded, relative_path
 from data_sources.core.registry import register_connector
 
 #: Drive's longest lifetime for a channel on the change feed.
@@ -193,7 +193,7 @@ class GoogleDriveConnector(Connector):
     async def list(
         self, path: str | None = None, *, recursive: bool = False
     ) -> AsyncIterator[Item]:
-        start_path = (path or "").strip("/")
+        start_path = relative_path(path)
         if is_excluded(start_path, self._excluded_paths):
             return
         folder_id = (
