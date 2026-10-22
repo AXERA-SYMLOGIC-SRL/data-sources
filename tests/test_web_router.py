@@ -126,6 +126,21 @@ def test_webhook_notifies_callback_with_connector_and_payload() -> None:
     assert received == [(connector, {"resource": "changed"})]
 
 
+def test_webhook_without_a_json_body_is_described_by_its_headers() -> None:
+    connector = WebDummyConnector(ConnectorConfig(provider="web-dummy"))
+    received: list[dict[str, Any]] = []
+
+    async def on_webhook_notification(conn: Connector, payload: dict[str, Any]) -> None:
+        received.append(payload)
+
+    client = _client(connector, on_webhook_notification=on_webhook_notification)
+
+    response = client.post("/webhooks", headers={"X-Goog-Channel-ID": "channel-1"})
+
+    assert response.status_code == 202
+    assert received[0]["x-goog-channel-id"] == "channel-1"
+
+
 def test_webhook_without_callback_just_acknowledges() -> None:
     client = _client(WebDummyConnector(ConnectorConfig(provider="web-dummy")))
 

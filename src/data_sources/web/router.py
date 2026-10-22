@@ -35,7 +35,9 @@ def build_router(
     providers' webhooks are pure pings with no data of their own (Graph/SharePoint —
     you always have to call `sync()` to learn what changed), but others deliver the
     actual event in the notification body itself, in which case the payload *is*
-    the useful part and the caller shouldn't have to re-parse `request.json()`.
+    the useful part and the caller shouldn't have to re-parse `request.json()`. A
+    notification with no JSON body (Google Drive's, which says everything in `X-Goog-*`
+    headers) has its request headers, lower-cased, as the payload instead.
     """
     router = APIRouter(prefix=prefix, tags=[connector.provider])
 
@@ -89,10 +91,11 @@ def build_router(
             if validation_token is not None:
                 return PlainTextResponse(validation_token)
 
+            # A notification with no JSON body (Google Drive's) is described by its headers.
             try:
                 payload = await request.json()
             except ValueError:
-                payload = {}
+                payload = dict(request.headers)
 
             if not await connector.verify_webhook_notification(payload):
                 raise HTTPException(
