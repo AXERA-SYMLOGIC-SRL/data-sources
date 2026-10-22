@@ -127,6 +127,22 @@ A missing name raises `NotFoundError` and an ambiguous one (two sibling folders 
 same name) raises `DataSourceError`. `list(recursive=True)` returns files only;
 `list(recursive=False)` also returns the subfolders, as `ItemType.FOLDER`.
 
+### Paged listing
+
+For a UI that shows a page at a time:
+
+```python
+page = await connector.list_page("Q1", page_size=50, search="invoice")
+# page.items, page.next_page_token: pass it back with the same arguments for the next page
+```
+
+`search` keeps items whose name contains it, case-insensitively. Paging uses Drive's own
+page tokens. A recursive listing carries the folders still to read in the token, and each
+of those folders is placed again by its current ancestry before it is read. A folder that
+isn't inside the connected folder, whether forged into a token or moved out since, is
+skipped rather than listed. A token from another listing (another path, or `recursive`
+differing) raises `InvalidPageTokenError`.
+
 ## Incremental sync
 
 The calls are the same as SharePoint's (see [sharepoint.md](sharepoint.md)):

@@ -139,6 +139,21 @@ The comparison is on the full path from the drive's top, segment by segment and
 case-insensitively, as SharePoint paths are. It never relies on the folder's name alone,
 since another folder in the drive can share that name.
 
+### Paged listing
+
+```python
+page = await connector.list_page("Invoices", page_size=50, search="march")
+# page.items, page.next_page_token: pass it back with the same arguments for the next page
+```
+
+Paging follows Graph's own pages: a folder's `children`, or its `delta` feed for
+`recursive=True`. `search` keeps names containing it, case-insensitively.
+
+Graph's `@odata.nextLink` is a full URL, so it's never handed out as the token: a forged
+one would send this connector's access token wherever it pointed. The token carries only
+the link's query string, and the request is always rebuilt from the listing's own Graph
+address. A page may be shorter than `page_size`, even empty, without being the last.
+
 ### Incremental sync
 
 ```python

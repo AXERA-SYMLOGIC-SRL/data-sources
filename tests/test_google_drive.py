@@ -32,6 +32,7 @@ from data_sources.core.exceptions import (
     AuthenticationError,
     ConfigurationError,
     DataSourceError,
+    InvalidPageTokenError,
     NotFoundError,
     RateLimitError,
     UnsupportedOperationError,
@@ -45,6 +46,7 @@ from data_sources.core.models import (
     PermissionRole,
     SyncCursor,
 )
+from data_sources.core.paging import encode_token
 from data_sources.store import init_connector, init_store
 from data_sources.store.base import Store
 
@@ -172,7 +174,15 @@ class FakeDrive:
             self.stopped.append(json.loads(request.content))
             return httpx.Response(204)
         if path == "files":
-            return httpx.Response(200, json={"files": self._query(params["q"])})
+            matched = self._query(params["q"])
+            if params.get("orderBy") == "folder,name":
+                matched.sort(key=lambda raw: (raw["mimeType"] != FOLDER_MIME, raw["name"]))
+            start = int(params.get("pageToken", 0))
+            end = start + int(params.get("pageSize", 1000))
+            listed: dict[str, Any] = {"files": matched[start:end]}
+            if end < len(matched):
+                listed["nextPageToken"] = str(end)
+            return httpx.Response(200, json=listed)
 
         match = re.fullmatch(r"files/([^/]+)(/export|/permissions)?", path)
         assert match, f"unexpected request {request.url}"
@@ -457,6 +467,110 @@ class TestList:
             _ = [item async for item in connector.list("Q9")]
         with pytest.raises(NotFoundError):
             _ = [item async for item in connector.list("../x")]
+
+
+async def all_pages(connector: GoogleDriveConnector, **kwargs: Any) -> list[list[Item]]:
+    pages: list[list[Item]] = []
+    token: str | None = None
+    while True:
+        page = await connector.list_page(page_token=token, **kwargs)
+        pages.append(page.items)
+        token = page.next_page_token
+        if token is None:
+            return pages
+
+
+class TestListPage:
+    async def test_one_level_pages_through_what_list_yields(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        for n in range(5):
+            drive.add(f"f{n}", f"file-{n}.pdf", ROOT)
+        connector = await connected(drive, excluded_paths=["Archive"])
+
+        pages = await all_pages(connector, page_size=2)
+
+        assert all(len(page) <= 2 for page in pages)
+        paged = [item.id for page in pages for item in page]
+        assert sorted(paged) == sorted([item.id async for item in connector.list()])
+        assert paged[0] == "sub"  # folders first
+
+    async def test_recursive_pages_walk_the_subtree(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        drive.add("deep", "Deep", "sub", folder=True)
+        drive.add("d1", "d1.pdf", "deep")
+        connector = await connected(drive, excluded_paths=["Archive"])
+
+        pages = await all_pages(connector, recursive=True, page_size=1)
+
+        items = {item.id: item for page in pages for item in page}
+        assert set(items) == {"a", "b", "doc", "d1"}
+        assert items["d1"].path == "Q1/Deep"
+
+    async def test_search_matches_names_case_insensitively(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        drive.add("inv1", "Invoice-March.pdf", "sub")
+        drive.add("inv2", "old invoice.pdf", ROOT)
+        connector = await connected(drive)
+
+        pages = await all_pages(connector, recursive=True, page_size=1, search="INVOICE")
+
+        assert sorted(item.id for page in pages for item in page) == ["inv1", "inv2"]
+
+    async def test_a_token_only_resumes_its_own_listing(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        connector = await connected(drive)
+        page = await connector.list_page(page_size=1)
+        assert page.next_page_token is not None
+
+        with pytest.raises(InvalidPageTokenError):
+            await connector.list_page("Q1", page_size=1, page_token=page.next_page_token)
+        with pytest.raises(InvalidPageTokenError):
+            await connector.list_page(recursive=True, page_size=1, page_token=page.next_page_token)
+        with pytest.raises(InvalidPageTokenError):
+            await connector.list_page(page_token="not-a-token")
+
+    async def test_a_forged_token_cannot_list_outside(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        connector = await connected(drive)
+        forged = encode_token(
+            {
+                "kind": "google_drive",
+                "start": ROOT,
+                "recursive": True,
+                "folder": "myroot",
+                "path": "",
+                "drive_token": None,
+                "queue": [["myroot", ""]],
+            }
+        )
+
+        page = await connector.list_page(recursive=True, page_token=forged)
+
+        assert page.items == [] and page.next_page_token is None
+
+    async def test_a_folder_moved_out_between_pages_is_dropped(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        connector = await connected(drive, excluded_paths=["Archive"])
+        first = await connector.list_page(recursive=True, page_size=1)
+        assert [item.id for item in first.items] == ["a"]  # Q1 is queued, not yet read
+        assert first.next_page_token is not None
+
+        drive.files["sub"]["parents"] = ["myroot"]
+        rest = await connector.list_page(recursive=True, page_token=first.next_page_token)
+
+        assert rest.items == [] and rest.next_page_token is None
+
+    async def test_page_size_must_be_positive(self) -> None:
+        connector = await connected(FakeDrive())
+
+        with pytest.raises(ValueError):
+            await connector.list_page(page_size=0)
 
 
 class TestBoundary:

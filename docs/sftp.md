@@ -110,6 +110,13 @@ elsewhere, and a path in an excluded folder. Symlinks are covered too:
 `download` checks `item.id` again rather than trusting the `Item` it's given. FTP exposes
 no symlinks, so there the check is on the normalized path alone.
 
+### Paged listing
+
+`list_page(path, recursive=..., page_size=..., page_token=..., search=...)` returns one
+`ItemPage` at a time. Neither protocol pages natively, so this is the library's default:
+each call walks `list()` from the start and skips what earlier pages returned. It's fine
+for browsing a folder, but slow for very large trees.
+
 ### Incremental sync
 
 ```python

@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from data_sources.config.schema import ConnectorConfig
+from data_sources.connectors.google_drive import pages
 from data_sources.connectors.google_drive.auth import credential_from_config
 from data_sources.connectors.google_drive.client import (
     FOLDER_MIME,
@@ -45,12 +46,14 @@ from data_sources.core.logging import logger
 from data_sources.core.models import (
     Change,
     Item,
+    ItemPage,
     Permission,
     PermissionPrincipalType,
     PermissionRole,
     Subscription,
     SyncCursor,
 )
+from data_sources.core.paging import check_page_size
 from data_sources.core.paths import is_excluded, relative_path
 from data_sources.core.registry import register_connector
 
@@ -220,6 +223,39 @@ class GoogleDriveConnector(Connector):
                     yield to_item(raw, start_path, self._exports)
             elif is_document(raw, self._exports):
                 yield to_item(raw, start_path, self._exports)
+
+    async def list_page(
+        self,
+        path: str | None = None,
+        *,
+        recursive: bool = False,
+        page_size: int = 100,
+        page_token: str | None = None,
+        search: str | None = None,
+    ) -> ItemPage:
+        """Drive's own paging (see `pages.list_page`) — every folder a token names is checked
+        to be inside the root before it is read."""
+        check_page_size(page_size)
+        start_path = relative_path(path)
+        if is_excluded(start_path, self._excluded_paths):
+            return ItemPage()
+        folder_id = (
+            await resolve_path(self.client, self._root, start_path, self._drive_id)
+            if start_path
+            else self._root
+        )
+        return await pages.list_page(
+            self.client,
+            self._root,
+            self._drive_id,
+            (folder_id, start_path),
+            recursive=recursive,
+            page_size=page_size,
+            page_token=page_token,
+            search=search,
+            excluded=self._excluded_paths,
+            exports=self._exports,
+        )
 
     async def get_metadata(self, item_id: str) -> Item:
         raw, parent_path = await self._inside(item_id)

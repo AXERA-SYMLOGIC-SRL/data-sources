@@ -10,6 +10,7 @@ from urllib.parse import unquote
 from azure.identity.aio import ClientSecretCredential
 
 from data_sources.config.schema import ConnectorConfig
+from data_sources.connectors.sharepoint import pages
 from data_sources.connectors.sharepoint.client import SharepointClient
 from data_sources.connectors.sharepoint.models import (
     SharePointItemRecord,
@@ -30,10 +31,12 @@ from data_sources.core.models import (
     Hash,
     HashAlgorithm,
     Item,
+    ItemPage,
     ItemType,
     Subscription,
     SyncCursor,
 )
+from data_sources.core.paging import check_page_size
 from data_sources.core.paths import is_excluded, join, relative_path
 from data_sources.core.registry import register_connector
 
@@ -166,18 +169,60 @@ class SharePointConnector(Connector):
                 self._resolved_site_id, self._resolved_drive_id, item_path
             )
             async for raw, _ in self.client.get_delta(delta_url):
-                if self._skip(raw):
-                    continue
-                yield self._to_item(raw)
+                if (document := self._listed_document(raw)) is not None:
+                    yield document
         else:
             async for raw in self.client.list_children(self._resolved_drive_id, item_path):
-                if "deleted" in raw or self._is_excluded(raw):
-                    continue
-                if "folder" in raw and is_excluded(
-                    join(self._relative_path(raw), raw.get("name", "")), self._excluded_paths
-                ):
-                    continue
-                yield self._to_item(raw)
+                if (child := self._listed_child(raw)) is not None:
+                    yield child
+
+    async def list_page(
+        self,
+        path: str | None = None,
+        *,
+        recursive: bool = False,
+        page_size: int = 100,
+        page_token: str | None = None,
+        search: str | None = None,
+    ) -> ItemPage:
+        """Graph's own paging (see `pages.list_page`) — a token can't point the next
+        request anywhere but this listing's own Graph address."""
+        check_page_size(page_size)
+        relative = relative_path(path)
+        if is_excluded(relative, self._excluded_paths):
+            return ItemPage()
+        item_path = self._drive_path(relative)
+        if recursive:
+            base_url = self.client.delta_url(
+                self._resolved_site_id, self._resolved_drive_id, item_path
+            )
+            take = self._listed_document
+        else:
+            base_url = self.client.children_url(self._resolved_drive_id, item_path)
+            take = self._listed_child
+        return await pages.list_page(
+            self.client,
+            base_url,
+            (relative, recursive),
+            take,
+            page_size=page_size,
+            page_token=page_token,
+            search=search,
+        )
+
+    def _listed_document(self, raw: dict[str, Any]) -> Item | None:
+        """A delta entry as a listed document — folders, deletions and excluded ones aren't."""
+        return None if self._skip(raw) else self._to_item(raw)
+
+    def _listed_child(self, raw: dict[str, Any]) -> Item | None:
+        """One child of a listed folder — a live document or a non-excluded subfolder."""
+        if "deleted" in raw or self._is_excluded(raw):
+            return None
+        if "folder" in raw and is_excluded(
+            join(self._relative_path(raw), raw.get("name", "")), self._excluded_paths
+        ):
+            return None
+        return self._to_item(raw)
 
     async def get_metadata(self, item_id: str) -> Item:
         """`item_id`'s metadata, refused (`NotFoundError`) unless it is the root folder or

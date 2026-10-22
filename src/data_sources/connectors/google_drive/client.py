@@ -152,6 +152,23 @@ class GoogleDriveClient:
         query = f"{query_literal(folder_id)} in parents and trashed = false"
         return self._paginate("files", self._list_params(query, drive_id), "files")
 
+    async def children_page(
+        self, folder_id: str, drive_id: str | None, page_size: int, page_token: str | None
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        """One page of `folder_id`'s live children — folders first, then by name — and the
+        token of the next page, if any."""
+        query = f"{query_literal(folder_id)} in parents and trashed = false"
+        params = {
+            **self._list_params(query, drive_id),
+            "pageSize": min(page_size, 1000),
+            "orderBy": "folder,name",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        page = await self.request("GET", "files", params=params)
+        next_token = page.get("nextPageToken")
+        return list(page.get("files", [])), str(next_token) if next_token else None
+
     async def find_child_folders(
         self, parent_id: str, name: str, drive_id: str | None
     ) -> list[dict[str, Any]]:

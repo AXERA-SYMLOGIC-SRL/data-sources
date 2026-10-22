@@ -26,6 +26,10 @@ class NotFoundError(DataSourceError):
     """Raised when a requested item does not exist at the provider."""
 
 
+class InvalidPageTokenError(DataSourceError):
+    """Raised when a `list_page` token wasn't one this connector issued for that listing."""
+
+
 class UnsupportedOperationError(DataSourceError):
     """Raised when a connector does not implement an optional capability."""
 

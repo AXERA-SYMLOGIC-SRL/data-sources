@@ -81,6 +81,15 @@ class Change(BaseModel):
     cursor: SyncCursor | None = None
 
 
+class ItemPage(BaseModel):
+    """One page of a listing. `next_page_token` is opaque — pass it back to `list_page`
+    with the same arguments for the next page; `None` once the listing is done. A page may
+    hold fewer than `page_size` items (even none) and still not be the last."""
+
+    items: list[Item] = Field(default_factory=list)
+    next_page_token: str | None = None
+
+
 class Subscription(BaseModel):
     """A provider's change-notification subscription (e.g. a Graph webhook)."""
 

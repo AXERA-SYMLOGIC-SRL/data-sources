@@ -8,7 +8,16 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from data_sources.config.schema import ConnectorConfig
 from data_sources.core.exceptions import UnsupportedOperationError
-from data_sources.core.models import Change, ChangeType, Item, Permission, Subscription, SyncCursor
+from data_sources.core.models import (
+    Change,
+    ChangeType,
+    Item,
+    ItemPage,
+    Permission,
+    Subscription,
+    SyncCursor,
+)
+from data_sources.core.paging import page_by_offset
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import DeclarativeBase
@@ -61,6 +70,27 @@ class Connector(ABC):
     @abstractmethod
     def list(self, path: str | None = None, *, recursive: bool = False) -> AsyncIterator[Item]:
         """List items under `path` (provider root if omitted)."""
+
+    async def list_page(
+        self,
+        path: str | None = None,
+        *,
+        recursive: bool = False,
+        page_size: int = 100,
+        page_token: str | None = None,
+        search: str | None = None,
+    ) -> ItemPage:
+        """One page of what `list(path, recursive=recursive)` yields, keeping only items whose
+        name contains `search` (case-insensitively) when given.
+
+        This default works for any connector: it walks `list()` from the start each call and
+        skips what earlier pages returned. Connectors whose provider pages natively override
+        it; their tokens are still opaque, and checked so a forged one can't list outside
+        the connected folder.
+        """
+        return await page_by_offset(
+            self.list(path, recursive=recursive), page_size, page_token, search
+        )
 
     @abstractmethod
     async def get_metadata(self, item_id: str) -> Item:

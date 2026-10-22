@@ -16,6 +16,7 @@ from data_sources.connectors.sharepoint.models import SharePointItemRecord, Shar
 from data_sources.core.exceptions import (
     AuthenticationError,
     ConfigurationError,
+    InvalidPageTokenError,
     NotFoundError,
 )
 from data_sources.core.exceptions import (
@@ -402,6 +403,113 @@ class TestBoundary:
             ("1", ItemType.FILE),
             ("2", ItemType.FOLDER),
         ]
+
+
+def _paged_graph(
+    values: list[dict[str, Any]], per_page: int = 2, next_host: str = "graph.microsoft.com"
+) -> tuple[SharePointConnector, list[httpx.URL]]:
+    """A connector whose client talks to a mocked Graph serving `values` `per_page` at a
+    time, by `$skiptoken` — its `nextLink`s on `next_host`."""
+    seen: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url)
+        skip = int(request.url.params.get("$skiptoken", 0))
+        body: dict[str, Any] = {"value": values[skip : skip + per_page]}
+        if skip + per_page < len(values):
+            body["@odata.nextLink"] = (
+                f"https://{next_host}/v1.0/anything?$skiptoken={skip + per_page}"
+            )
+        return httpx.Response(200, json=body)
+
+    connector, _ = make_connector(excluded_paths=["Archive"])
+    connector._client = SharepointClient(
+        FakeCredential(), ["scope"], http=httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    )
+    return connector, seen
+
+
+async def _all_pages(connector: SharePointConnector, **kwargs: Any) -> list[list[Item]]:
+    pages: list[list[Item]] = []
+    token: str | None = None
+    while True:
+        page = await connector.list_page(page_token=token, **kwargs)
+        pages.append(page.items)
+        token = page.next_page_token
+        if token is None:
+            return pages
+
+
+class TestListPage:
+    @pytest.mark.asyncio
+    async def test_pages_children_across_graph_pages_and_within_one(self) -> None:
+        values = [_drive_item(str(n), f"file-{n}.pdf") for n in range(5)]
+        values.insert(2, _drive_item("sub", "Sub", folder=True))
+        values.insert(4, _drive_item("gone", "gone.pdf", deleted=True))
+        values.append(_drive_item("arch", "Archive", folder=True))
+        connector, _ = _paged_graph(values)
+
+        pages = await _all_pages(connector, page_size=3)
+
+        # The second page ends mid Graph page; the third resumes there and finds only
+        # the excluded folder — a page may be empty and still not be known as the last.
+        assert [[item.id for item in page] for page in pages] == [
+            ["0", "1", "sub"],
+            ["2", "3", "4"],
+            [],
+        ]
+
+    @pytest.mark.asyncio
+    async def test_requests_stay_on_the_listings_own_graph_address(self) -> None:
+        values = [_drive_item(str(n), f"file-{n}.pdf") for n in range(4)]
+        connector, seen = _paged_graph(values, next_host="evil.example")
+
+        await _all_pages(connector, page_size=1)
+
+        assert {url.host for url in seen} == {"graph.microsoft.com"}
+        assert {url.path for url in seen} == {"/v1.0/drives/drive1/root:/Reports/Q1:/children"}
+
+    @pytest.mark.asyncio
+    async def test_recursive_pages_the_delta_feed_documents_only(self) -> None:
+        values = [
+            _drive_item("1", "a.pdf"),
+            _drive_item("sub", "Sub", folder=True),
+            _drive_item("2", "b.pdf", parent_path="/drives/drive1/root:/Reports/Q1/Sub"),
+            _drive_item("3", "old.pdf", parent_path="/drives/drive1/root:/Reports/Q1/Archive"),
+        ]
+        connector, seen = _paged_graph(values)
+
+        pages = await _all_pages(connector, recursive=True, page_size=5)
+
+        assert [item.id for page in pages for item in page] == ["1", "2"]
+        assert seen[0].path == "/v1.0/sites/site1/drives/drive1/root:/Reports/Q1:/delta"
+
+    @pytest.mark.asyncio
+    async def test_search_matches_names_case_insensitively(self) -> None:
+        values = [
+            _drive_item("1", "Invoice-March.pdf"),
+            _drive_item("2", "notes.pdf"),
+            _drive_item("3", "old invoice.pdf"),
+        ]
+        connector, _ = _paged_graph(values, per_page=1)
+
+        pages = await _all_pages(connector, page_size=1, search="INVOICE")
+
+        assert [item.id for page in pages for item in page] == ["1", "3"]
+
+    @pytest.mark.asyncio
+    async def test_a_token_only_resumes_its_own_listing(self) -> None:
+        values = [_drive_item(str(n), f"file-{n}.pdf") for n in range(3)]
+        connector, _ = _paged_graph(values)
+        page = await connector.list_page(page_size=1)
+        assert page.next_page_token is not None
+
+        with pytest.raises(InvalidPageTokenError):
+            await connector.list_page("Sub", page_token=page.next_page_token)
+        with pytest.raises(InvalidPageTokenError):
+            await connector.list_page(recursive=True, page_token=page.next_page_token)
+        with pytest.raises(InvalidPageTokenError):
+            await connector.list_page(page_token="garbage")
 
 
 class TestSync:

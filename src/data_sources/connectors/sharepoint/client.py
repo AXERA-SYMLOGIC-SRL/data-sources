@@ -145,10 +145,11 @@ class SharepointClient:
     async def get_folder(self, drive_id: str, item_path: str) -> dict[str, Any]:
         return await self.get_json(f"{self.BASE_URL}/drives/{drive_id}/{self._anchor(item_path)}")
 
+    def children_url(self, drive_id: str, item_path: str) -> str:
+        return f"{self.BASE_URL}/drives/{drive_id}/{self._anchor(item_path)}/children"
+
     def list_children(self, drive_id: str, item_path: str) -> AsyncIterator[dict[str, Any]]:
-        return self._paginate(
-            f"{self.BASE_URL}/drives/{drive_id}/{self._anchor(item_path)}/children"
-        )
+        return self._paginate(self.children_url(drive_id, item_path))
 
     def delta_url(self, site_id: str, drive_id: str, item_path: str) -> str:
         return f"{self.BASE_URL}/sites/{site_id}/drives/{drive_id}/root:/{item_path}:/delta"

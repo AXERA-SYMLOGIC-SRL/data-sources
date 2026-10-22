@@ -32,6 +32,13 @@ Connectors live under `src/data_sources/connectors/<provider>/` and implement th
 - Implement `connect`, `validate`, `list`, `get_metadata`, `download`, and `close`.
 - Opt into `supports_sync`, `supports_permissions`, or `supports_webhooks` only if the
   corresponding methods are implemented.
+- Override `list_page` when the provider pages natively. The default walks `list()`
+  from the start on every call. Keep the token opaque (`core.paging.encode_token`), and
+  check what it names: a token is caller input, so a forged one must not reach outside
+  the connected folder or make the connector call any URL but its own.
+- Enforce the connected folder as a boundary in `get_metadata`, `download` and
+  `list(path)` (`path` is relative to it; see `core.paths`), whatever id or path the
+  caller passes.
 - Register itself with `@register_connector("<provider>")`.
 - Ship tests under `tests/` covering at least `validate`, `list`, and `download`.
 
