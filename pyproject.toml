@@ -29,7 +29,8 @@ dependencies = [
     "greenlet (>=3.0.0,<4.0.0)",
     "alembic (>=1.16.5,<2.0.0)",
     "aiosqlite (>=0.21.0,<0.22.0)",
-    "aioftp (>=0.27.2,<0.28.0)"
+    "aioftp (>=0.27.2,<0.28.0)",
+    "google-auth (>=2.40,<3)"
 ]
 
 [project.urls]
