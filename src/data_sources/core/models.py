@@ -66,6 +66,17 @@ class ChangeType(StrEnum):
     DELETED = "deleted"
 
 
+class ConflictBehavior(StrEnum):
+    """What `upload` does when the folder already holds a file of that name."""
+
+    #: Refuse, raising `ConflictError`.
+    FAIL = "fail"
+    #: Write over it — the same file, its id kept where the provider allows.
+    REPLACE = "replace"
+    #: Write beside it under a free name: `report (1).pdf`, `report (2).pdf`…
+    RENAME = "rename"
+
+
 class SyncCursor(BaseModel):
     token: str | None = None
 

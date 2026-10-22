@@ -26,6 +26,10 @@ class NotFoundError(DataSourceError):
     """Raised when a requested item does not exist at the provider."""
 
 
+class ConflictError(DataSourceError):
+    """Raised when `upload` finds the name taken and was told not to replace or rename."""
+
+
 class InvalidPageTokenError(DataSourceError):
     """Raised when a `list_page` token wasn't one this connector issued for that listing."""
 

@@ -37,7 +37,8 @@ config = ConnectorConfig(
 ```
 
 - **`auth.credentials`** — an Azure AD app registration with `Sites.Read.All` (or
-  narrower, site-specific) Graph application permissions. All three of `tenant_id`,
+  narrower, site-specific) Graph application permissions; [writing](#writing) needs
+  `Sites.ReadWrite.All`, or `Sites.Selected` granted the `write` role. All three of `tenant_id`,
   `client_id`, `client_secret` are required; the connector raises `ConfigurationError`
   at `connect()` time if any are missing.
 
@@ -180,6 +181,28 @@ Graph again.
 `sync_in_background` runs until the delta feed is exhausted, once. Call it again — on a
 timer, or in reaction to a webhook — to keep picking up new changes; it does not loop or
 poll on its own.
+
+## Writing
+
+```python
+from data_sources.core import ConflictBehavior
+
+item = await connector.upload("Out/2026", "report.pdf", pdf_bytes)  # folders made as needed
+item = await connector.upload("Out/2026", "report.pdf", newer, on_conflict=ConflictBehavior.REPLACE)
+await connector.create_folder("Out/2027")
+await connector.delete(item.id)  # to the site's recycle bin; permanent=True deletes outright
+```
+
+- Graph settles a taken name itself, through `@microsoft.graph.conflictBehavior`:
+  - `FAIL` (the default) raises `ConflictError`;
+  - `REPLACE` writes over the file, keeping its id;
+  - `RENAME` lets Graph pick the new name, e.g. `report 1.pdf`.
+- Content up to 4 MB goes up in one request. Above that, it goes through an upload session
+  in 10 MB chunks. The session's `uploadUrl` is pre-authorized, so it is never sent the
+  access token.
+- Writes stay inside the sharing link's folder but may go into an excluded one.
+- A file the connector writes shows up in its own `sync()`.
+- `delete` refuses the connected folder itself and anything outside it.
 
 ## Webhooks
 

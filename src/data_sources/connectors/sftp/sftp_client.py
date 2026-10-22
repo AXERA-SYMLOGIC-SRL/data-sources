@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import stat as stat_module
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import cast
 
@@ -158,6 +159,47 @@ class SFTPClient:
         except asyncssh.SFTPError as exc:
             self.logger.error(f"SFTP error downloading {path}: {exc}")
             raise DataSourceError(f"SFTP error downloading {path}: {exc}") from exc
+
+    @asynccontextmanager
+    async def _errors(self, action: str, path: str) -> AsyncIterator[None]:
+        try:
+            yield
+        except asyncssh.SFTPNoSuchFile as exc:
+            self.logger.warning(f"SFTP path not found while trying to {action} {path}")
+            raise NotFoundError(f"SFTP path not found: {path}") from exc
+        except asyncssh.SFTPError as exc:
+            self.logger.error(f"SFTP error trying to {action} {path}: {exc}")
+            raise DataSourceError(f"SFTP error trying to {action} {path}: {exc}") from exc
+
+    async def mkdir(self, path: str) -> None:
+        async with self._errors("create", path):
+            await self._sftp.mkdir(path)
+
+    async def write(self, path: str, content: bytes) -> None:
+        async with self._errors("write", path), self._sftp.open(path, "wb") as f:
+            await f.write(content)
+
+    async def rename(self, source: str, target: str, *, overwrite: bool) -> None:
+        """With `overwrite`, an atomic replace where the server offers it (OpenSSH's
+        `posix-rename`); otherwise the old file is removed first."""
+        async with self._errors("rename", source):
+            if not overwrite:
+                await self._sftp.rename(source, target)
+                return
+            try:
+                await self._sftp.posix_rename(source, target)
+            except asyncssh.SFTPOpUnsupported:
+                if await self._sftp.exists(target):
+                    await self._sftp.remove(target)
+                await self._sftp.rename(source, target)
+
+    async def remove(self, path: str) -> None:
+        async with self._errors("remove", path):
+            await self._sftp.remove(path)
+
+    async def rmdir(self, path: str) -> None:
+        async with self._errors("remove", path):
+            await self._sftp.rmdir(path)
 
 
 def _to_entry(path: str, attrs: asyncssh.SFTPAttrs) -> RemoteEntry:

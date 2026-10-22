@@ -117,6 +117,34 @@ no symlinks, so there the check is on the normalized path alone.
 each call walks `list()` from the start and skips what earlier pages returned. It's fine
 for browsing a folder, but slow for very large trees.
 
+### Writing
+
+```python
+from data_sources.core import ConflictBehavior
+
+item = await connector.upload("out/2026", "report.pdf", pdf_bytes)  # folders made as needed
+item = await connector.upload("out/2026", "report.pdf", newer, on_conflict=ConflictBehavior.REPLACE)
+await connector.create_folder("out/2027")
+await connector.delete(item.id)  # permanent: neither protocol has a bin
+```
+
+- **Safe writes.** Content is written to a hidden temporary name (`.report.pdf.<id>.part`)
+  beside the target, then renamed onto it, so a reader never sees a half-written file.
+  `REPLACE` uses OpenSSH's atomic `posix-rename` where the server offers it. Otherwise,
+  and always on FTP, the old file is removed first, which is not atomic.
+- **Folders.** Missing folders are made one level at a time, and each existing level is
+  checked first. A symlink in the path is refused, so nothing is created through a link
+  to outside `root_path`, and a file in the way raises `ConflictError`.
+- **A taken name:**
+  - `FAIL` raises `ConflictError`;
+  - `REPLACE` writes over a file, but never over a folder or a symlink;
+  - `RENAME` writes beside it as `report (1).pdf`.
+- **Not one step.** Checking the name and writing are separate, so a file that appears
+  in between may be written over (SFTP) or refused by the server.
+- **Excluded folders.** Writes may go into an excluded folder, never outside `root_path`.
+- **Deleting.** `delete` removes a file or an *empty* folder, and refuses symlinks and
+  `root_path` itself.
+
 ### Incremental sync
 
 ```python

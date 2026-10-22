@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import mimetypes
 import posixpath
 import stat as stat_module
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 from urllib.parse import urlparse
@@ -16,14 +18,26 @@ from data_sources.connectors.sftp.sftp_client import SFTPClient
 from data_sources.core.connector import Connector
 from data_sources.core.exceptions import (
     ConfigurationError,
+    ConflictError,
     ConnectionError,
     DataSourceError,
     NotFoundError,
+    UnsupportedOperationError,
 )
 from data_sources.core.logging import logger
-from data_sources.core.models import Change, ChangeType, Item, ItemType, SyncCursor
-from data_sources.core.paths import is_excluded, relative_path
+from data_sources.core.models import (
+    Change,
+    ChangeType,
+    ConflictBehavior,
+    Item,
+    ItemType,
+    SyncCursor,
+)
+from data_sources.core.paths import check_name, is_excluded, relative_path, renamed
 from data_sources.core.registry import register_connector
+
+#: How many `name (n)` candidates a rename tries before giving up.
+_MAX_RENAMES = 1000
 
 #: Scheme -> default port, and the set of schemes `options.url` may use.
 _DEFAULT_PORTS = {"sftp": 22, "ftp": 21}
@@ -59,6 +73,7 @@ class SFTPConnector(Connector):
     provider = "sftp"
     supports_sync = True
     supports_item_lookup = True
+    supports_write = True
     models = (SFTPSyncState, SFTPItemRecord)
 
     def __init__(self, config: ConnectorConfig) -> None:
@@ -169,6 +184,92 @@ class SFTPConnector(Connector):
         checked = await self.get_metadata(item.id)
         async for chunk in self.client.download(checked.id):
             yield chunk
+
+    async def upload(
+        self,
+        folder: str | None,
+        name: str,
+        content: bytes,
+        *,
+        mime_type: str | None = None,
+        on_conflict: ConflictBehavior = ConflictBehavior.FAIL,
+    ) -> Item:
+        """See `Connector.upload`. The content is written to a hidden temporary name beside
+        the target, then renamed onto it, so nobody reads a half-written file. Checking the
+        name is taken and writing aren't one step: a file appearing in between can still be
+        written over (SFTP) or refused by the server."""
+        target_dir = await self._ensure_dir(self._resolve(folder))
+        target, overwrite = await self._target(target_dir, check_name(name), on_conflict)
+        temporary = posixpath.join(target_dir, f".{name}.{uuid.uuid4().hex}.part")
+        await self.client.write(temporary, content)
+        try:
+            await self.client.rename(temporary, target, overwrite=overwrite)
+        except BaseException:
+            with contextlib.suppress(DataSourceError):
+                await self.client.remove(temporary)
+            raise
+        return self._to_item(await self.client.lstat(target))
+
+    async def create_folder(self, path: str) -> Item:
+        return self._to_item(await self.client.lstat(await self._ensure_dir(self._resolve(path))))
+
+    async def delete(self, item_id: str, *, permanent: bool = False) -> None:
+        """See `Connector.delete`. Neither protocol has a bin: always permanent. A folder
+        must be empty."""
+        path = await self._inside(self._resolve(item_id))
+        if path == posixpath.normpath(self._root_path):
+            raise UnsupportedOperationError("the connected folder itself can't be deleted")
+        entry = await self.client.lstat(path)
+        if entry.permissions is not None and stat_module.S_ISLNK(entry.permissions):
+            raise NotFoundError(f"{item_id!r} is a symlink")
+        if entry.is_dir:
+            await self.client.rmdir(path)
+        else:
+            await self.client.remove(path)
+
+    async def _ensure_dir(self, target: str) -> str:
+        """The absolute `target` (under the root) as an existing directory, each missing
+        level made one at a time — and refused when a level is a symlink or a file, so
+        nothing is ever created through a link to outside."""
+        root = posixpath.normpath(self._root_path)
+        current = root
+        relative = posixpath.relpath(target, root)
+        for part in [] if relative == "." else relative.split("/"):
+            current = posixpath.join(current, part)
+            entry = await self._existing(current)
+            if entry is None:
+                await self.client.mkdir(current)
+            elif entry.permissions is not None and stat_module.S_ISLNK(entry.permissions):
+                raise NotFoundError(f"{current!r} is a symlink")
+            elif not entry.is_dir:
+                raise ConflictError(f"{current!r} is a file, not a folder")
+        return target
+
+    async def _target(
+        self, folder: str, name: str, on_conflict: ConflictBehavior
+    ) -> tuple[str, bool]:
+        """Where to write `name` in `folder`, and whether over a file already there."""
+        target = posixpath.join(folder, name)
+        existing = await self._existing(target)
+        if existing is None:
+            return target, False
+        if on_conflict is ConflictBehavior.REPLACE:
+            is_link = existing.permissions is not None and stat_module.S_ISLNK(existing.permissions)
+            if existing.is_dir or is_link:
+                raise ConflictError(f"{target!r} is a folder or a symlink; can't write over it")
+            return target, True
+        if on_conflict is ConflictBehavior.RENAME:
+            for n in range(1, _MAX_RENAMES + 1):
+                candidate = posixpath.join(folder, renamed(name, n))
+                if await self._existing(candidate) is None:
+                    return candidate, False
+        raise ConflictError(f"{target!r} already exists")
+
+    async def _existing(self, path: str) -> RemoteEntry | None:
+        try:
+            return await self.client.lstat(path)
+        except NotFoundError:
+            return None
 
     def _resolve(self, path: str | None) -> str:
         """A caller's path as an absolute one under the root — relative to the root, or

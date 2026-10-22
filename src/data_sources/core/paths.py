@@ -22,6 +22,22 @@ def relative_path(path: str | None) -> str:
     return "/".join(segments)
 
 
+def check_name(name: str) -> str:
+    """`name` as one file or folder name — refused (`ValueError`) when empty, `.`/`..`, or
+    holding a `/`, which would place it somewhere other than the folder it's written to."""
+    if not name or name in (".", "..") or "/" in name or "\\" in name:
+        raise ValueError(f"{name!r} is not a single file or folder name")
+    return name
+
+
+def renamed(name: str, n: int) -> str:
+    """`name` with ` (n)` before its extension — `report.pdf` → `report (2).pdf`."""
+    stem, dot, extension = name.rpartition(".")
+    if not dot or not stem:
+        return f"{name} ({n})"
+    return f"{stem} ({n}).{extension}"
+
+
 def is_excluded(path: str, excluded: Sequence[str]) -> bool:
     """Whether the folder at relative `path` is, or sits inside, one of `excluded` —
     matched by whole segments, so `Archive` excludes `Archive/2025` but not `Archive2025`."""

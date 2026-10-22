@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from data_sources.config.schema import ConnectorConfig
-from data_sources.connectors.google_drive import pages
+from data_sources.connectors.google_drive import pages, writes
 from data_sources.connectors.google_drive.auth import credential_from_config
 from data_sources.connectors.google_drive.client import (
     FOLDER_MIME,
@@ -45,6 +45,7 @@ from data_sources.core.exceptions import (
 from data_sources.core.logging import logger
 from data_sources.core.models import (
     Change,
+    ConflictBehavior,
     Item,
     ItemPage,
     Permission,
@@ -107,6 +108,7 @@ class GoogleDriveConnector(Connector):
     supports_item_lookup = True
     supports_webhooks = True
     supports_permissions = True
+    supports_write = True
     models = (
         GoogleDriveSyncState,
         GoogleDriveItemRecord,
@@ -277,18 +279,61 @@ class GoogleDriveConnector(Connector):
         async for chunk in chunks:
             yield chunk
 
-    async def _inside(self, item_id: str) -> tuple[dict[str, Any], str]:
-        """`item_id`'s metadata and parent path, refused unless it is the root or a live,
-        non-excluded item whose current ancestry reaches it."""
+    async def _inside(
+        self, item_id: str, *, allow_excluded: bool = False
+    ) -> tuple[dict[str, Any], str]:
+        """`item_id`'s metadata and parent path, refused unless it is the root or a live
+        item whose current ancestry reaches it — and, unless `allow_excluded` (writes),
+        not in an excluded folder."""
         raw = await self.client.get_file(item_id)
         if str(raw.get("id")) == self._root:
             return raw, ""
         if raw.get("trashed") or raw.get("mimeType") == SHORTCUT_MIME:
             raise NotFoundError(f"{item_id!r} is not inside the connected folder")
         parent_path = await Ancestry(self.client, self._root).parent_path(raw)
-        if parent_path is None or is_excluded(parent_path, self._excluded_paths):
+        if parent_path is None or (
+            not allow_excluded and is_excluded(parent_path, self._excluded_paths)
+        ):
             raise NotFoundError(f"{item_id!r} is not inside the connected folder")
         return raw, parent_path
+
+    async def upload(
+        self,
+        folder: str | None,
+        name: str,
+        content: bytes,
+        *,
+        mime_type: str | None = None,
+        on_conflict: ConflictBehavior = ConflictBehavior.FAIL,
+    ) -> Item:
+        """See `Connector.upload`. Needs a write scope (`drive`); a Google-native file or a
+        folder of the same name is never written over. Replacing keeps the file's id and
+        its revision history."""
+        return await writes.upload(
+            self.client,
+            self._root,
+            self._drive_id,
+            self._exports,
+            (folder, name),
+            content,
+            mime_type,
+            on_conflict,
+        )
+
+    async def create_folder(self, path: str) -> Item:
+        raw, parent_path = await writes.ensure_folder(self.client, self._root, self._drive_id, path)
+        return to_item(raw, parent_path, self._exports)
+
+    async def delete(self, item_id: str, *, permanent: bool = False) -> None:
+        """See `Connector.delete`: to Drive's bin (restorable for 30 days) unless
+        `permanent`. A folder goes with everything in it."""
+        raw, _ = await self._inside(item_id, allow_excluded=True)
+        if str(raw.get("id")) == self._root:
+            raise UnsupportedOperationError("the connected folder itself can't be deleted")
+        if permanent:
+            await self.client.delete_file(str(raw["id"]))
+        else:
+            await self.client.trash(str(raw["id"]))
 
     def sync(self, cursor: SyncCursor | None = None) -> AsyncIterator[Change]:
         self._sync = DriveSync(

@@ -21,6 +21,8 @@ Each connector exposes a consistent interface for:
 - File and folder enumeration
 - Metadata retrieval
 - Content download
+- Writing: upload, folder creation, delete
+- Paged, searchable listing
 - Incremental synchronization
 - Change detection
 - Permission retrieval

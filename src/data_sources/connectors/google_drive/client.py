@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
@@ -26,6 +28,22 @@ GOOGLE_APPS_PREFIX = "application/vnd.google-apps."
 
 #: 403 reasons Drive uses for throttling — retried like a 429, unlike a real permission error.
 _RATE_LIMIT_REASONS = {"rateLimitExceeded", "userRateLimitExceeded"}
+
+
+UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3"
+
+#: Content up to this size goes up in one request; above it, in a resumable session.
+SIMPLE_UPLOAD_LIMIT = 5 * 1024 * 1024
+
+#: One resumable chunk — Drive needs a multiple of 256 KiB.
+CHUNK_SIZE = 32 * 256 * 1024
+
+
+def _json(response: httpx.Response) -> dict[str, Any]:
+    if response.status_code == 204 or not response.content:
+        return {}
+    body: dict[str, Any] = response.json()
+    return body
 
 
 def query_literal(value: str) -> str:
@@ -85,19 +103,26 @@ class GoogleDriveClient:
             self.logger.error(f"Drive API error {response.status_code}: {response.text}")
             raise DataSourceError(f"Drive API error {response.status_code}: {response.text}")
 
-    async def request(
+    async def _send(
         self,
         method: str,
-        path: str,
+        url: str,
         *,
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
+        content: bytes | None = None,
+        headers: dict[str, str] | None = None,
         max_retries: int = 10,
-    ) -> dict[str, Any]:
-        url = f"{self.BASE_URL}/{path}"
+    ) -> httpx.Response:
+        """One call to `url`, retried while Drive throttles, raising on an error status."""
         for attempt in range(max_retries):
             response = await self._http.request(
-                method, url, params=params, json=json, headers=await self._auth_header()
+                method,
+                url,
+                params=params,
+                json=json,
+                content=content,
+                headers={**(headers or {}), **await self._auth_header()},
             )
 
             if self._is_rate_limited(response):
@@ -109,12 +134,23 @@ class GoogleDriveClient:
                 continue
 
             self._raise_for_status(response)
-            if response.status_code == 204 or not response.content:
-                return {}
-            body: dict[str, Any] = response.json()
-            return body
+            return response
 
         raise RateLimitError(f"Drive API throttled '{url}' after {max_retries} retries")
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        max_retries: int = 10,
+    ) -> dict[str, Any]:
+        response = await self._send(
+            method, f"{self.BASE_URL}/{path}", params=params, json=json, max_retries=max_retries
+        )
+        return _json(response)
 
     async def _paginate(
         self, path: str, params: dict[str, Any], key: str
@@ -174,14 +210,125 @@ class GoogleDriveClient:
     ) -> list[dict[str, Any]]:
         """The (at most two) live folders named exactly `name` directly inside `parent_id` —
         two meaning the name alone doesn't pick one."""
-        query = (
-            f"name = {query_literal(name)} and {query_literal(parent_id)} in parents "
-            f"and mimeType = '{FOLDER_MIME}' and trashed = false"
-        )
+        return await self.find_children_named(parent_id, name, drive_id, folders=True)
+
+    async def find_children_named(
+        self, parent_id: str, name: str, drive_id: str | None, *, folders: bool | None
+    ) -> list[dict[str, Any]]:
+        """The (at most two) live children of `parent_id` named exactly `name` — folders
+        only, other files only, or (`folders=None`) either."""
+        query = f"name = {query_literal(name)} and {query_literal(parent_id)} in parents"
+        if folders is not None:
+            query += f" and mimeType {'=' if folders else '!='} '{FOLDER_MIME}'"
+        query += " and trashed = false"
         page = await self.request(
             "GET", "files", params={**self._list_params(query, drive_id), "pageSize": 2}
         )
         return list(page.get("files", []))
+
+    async def create_folder(self, parent_id: str, name: str) -> dict[str, Any]:
+        return await self.request(
+            "POST",
+            "files",
+            params={"fields": FILE_FIELDS, "supportsAllDrives": "true"},
+            json={"name": name, "mimeType": FOLDER_MIME, "parents": [parent_id]},
+        )
+
+    async def create_file(
+        self, parent_id: str, name: str, mime_type: str, content: bytes
+    ) -> dict[str, Any]:
+        return await self._upload(
+            "POST", "files", {"name": name, "parents": [parent_id]}, mime_type, content
+        )
+
+    async def update_content(self, file_id: str, mime_type: str, content: bytes) -> dict[str, Any]:
+        """New content for an existing file — the same file, its id and history kept."""
+        return await self._upload("PATCH", f"files/{file_id}", None, mime_type, content)
+
+    async def trash(self, file_id: str) -> None:
+        await self.request(
+            "PATCH",
+            f"files/{file_id}",
+            params={"supportsAllDrives": "true"},
+            json={"trashed": True},
+        )
+
+    async def delete_file(self, file_id: str) -> None:
+        await self.request("DELETE", f"files/{file_id}", params={"supportsAllDrives": "true"})
+
+    async def _upload(
+        self,
+        method: str,
+        path: str,
+        metadata: dict[str, Any] | None,
+        mime_type: str,
+        content: bytes,
+    ) -> dict[str, Any]:
+        """Send `content` (with `metadata`, when creating) to the upload endpoint — in one
+        request up to `SIMPLE_UPLOAD_LIMIT`, in a resumable session above it."""
+        url = f"{UPLOAD_URL}/{path}"
+        params: dict[str, Any] = {"fields": FILE_FIELDS, "supportsAllDrives": "true"}
+        if len(content) > SIMPLE_UPLOAD_LIMIT:
+            return await self._resumable(method, url, params, metadata, mime_type, content)
+        if metadata is None:
+            response = await self._send(
+                method,
+                url,
+                params={**params, "uploadType": "media"},
+                content=content,
+                headers={"Content-Type": mime_type},
+            )
+            return _json(response)
+        boundary = f"data-sources-{uuid.uuid4().hex}"
+        body = (
+            f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".encode()
+            + json.dumps(metadata).encode()
+            + f"\r\n--{boundary}\r\nContent-Type: {mime_type}\r\n\r\n".encode()
+            + content
+            + f"\r\n--{boundary}--".encode()
+        )
+        response = await self._send(
+            method,
+            url,
+            params={**params, "uploadType": "multipart"},
+            content=body,
+            headers={"Content-Type": f"multipart/related; boundary={boundary}"},
+        )
+        return _json(response)
+
+    async def _resumable(
+        self,
+        method: str,
+        url: str,
+        params: dict[str, Any],
+        metadata: dict[str, Any] | None,
+        mime_type: str,
+        content: bytes,
+    ) -> dict[str, Any]:
+        session = await self._send(
+            method,
+            url,
+            params={**params, "uploadType": "resumable"},
+            json=metadata or {},
+            headers={
+                "X-Upload-Content-Type": mime_type,
+                "X-Upload-Content-Length": str(len(content)),
+            },
+        )
+        session_url = session.headers["Location"]
+        total = len(content)
+        response = session
+        for start in range(0, total, CHUNK_SIZE):
+            chunk = content[start : start + CHUNK_SIZE]
+            response = await self._send(
+                "PUT",
+                session_url,
+                content=chunk,
+                headers={"Content-Range": f"bytes {start}-{start + len(chunk) - 1}/{total}"},
+            )
+        if response.status_code not in (200, 201):
+            raise DataSourceError(f"Drive upload session ended with {response.status_code}")
+        return _json(response)
 
     async def _stream(self, path: str, params: dict[str, Any]) -> AsyncIterator[bytes]:
         async with self._http.stream(

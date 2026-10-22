@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from google.auth import jwt
 
 from data_sources.config.schema import AuthConfig, ConnectorConfig, StoreConfig
+from data_sources.connectors.google_drive import client as drive_client
 from data_sources.connectors.google_drive.auth import (
     TOKEN_URL,
     RefreshTokenCredential,
@@ -31,6 +32,7 @@ from data_sources.connectors.google_drive.scope import parse_folder
 from data_sources.core.exceptions import (
     AuthenticationError,
     ConfigurationError,
+    ConflictError,
     DataSourceError,
     InvalidPageTokenError,
     NotFoundError,
@@ -40,6 +42,7 @@ from data_sources.core.exceptions import (
 from data_sources.core.models import (
     Change,
     ChangeType,
+    ConflictBehavior,
     Item,
     ItemType,
     PermissionPrincipalType,
@@ -80,6 +83,9 @@ class FakeDrive:
         self.stopped: list[dict[str, Any]] = []
         self.permissions: dict[str, list[dict[str, Any]]] = {}
         self.requests: list[httpx.Request] = []
+        self.created = 0
+        self.uploads: list[str] = []
+        self.sessions: dict[str, dict[str, Any]] = {}
         self.add("myroot", "My Drive", None, folder=True)
         self.add(ROOT, "Reports", "myroot", folder=True)
 
@@ -145,8 +151,13 @@ class FakeDrive:
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
+        if request.url.path.startswith("/upload/drive/v3/"):
+            return self._upload(request)
         path = request.url.path.removeprefix("/drive/v3/")
         params = request.url.params
+
+        if request.method != "GET" and path.startswith("files"):
+            return self._write(request, path)
 
         if path == "changes/startPageToken":
             return httpx.Response(200, json={"startPageToken": str(len(self.log))})
@@ -206,8 +217,84 @@ class FakeDrive:
             if not raw["trashed"]
             and (parent is None or parent.group(1) in raw["parents"])
             and (name is None or raw["name"] == name.group(1))
-            and (FOLDER_MIME not in query or raw["mimeType"] == FOLDER_MIME)
+            and (f"mimeType = '{FOLDER_MIME}'" not in query or raw["mimeType"] == FOLDER_MIME)
+            and (f"mimeType != '{FOLDER_MIME}'" not in query or raw["mimeType"] != FOLDER_MIME)
         ]
+
+    def _new_id(self) -> str:
+        self.created += 1
+        return f"new{self.created}"
+
+    def _write(self, request: httpx.Request, path: str) -> httpx.Response:
+        """Metadata writes: create a folder, trash a file, delete one."""
+        if request.method == "POST" and path == "files":
+            body = json.loads(request.content)
+            raw = self.add(self._new_id(), body["name"], body["parents"][0], folder=True)
+            return httpx.Response(200, json=raw)
+        file_id = path.removeprefix("files/")
+        if file_id not in self.files:
+            return httpx.Response(404, json={"error": {"message": "File not found"}})
+        if request.method == "PATCH":
+            self.files[file_id].update(json.loads(request.content))
+            return httpx.Response(200, json=self.files[file_id])
+        if request.method == "DELETE":
+            del self.files[file_id]
+            return httpx.Response(204)
+        raise AssertionError(f"unexpected write {request.method} {request.url}")
+
+    def _upload(self, request: httpx.Request) -> httpx.Response:
+        """The upload endpoint: multipart creates, media updates, resumable sessions."""
+        path = request.url.path.removeprefix("/upload/drive/v3/")
+        kind = request.url.params.get("uploadType")
+        self.uploads.append(kind or "chunk")
+        if path.startswith("session/"):
+            return self._chunk(request, path.removeprefix("session/"))
+        if kind == "multipart":
+            boundary = request.headers["Content-Type"].split("boundary=")[1].encode()
+            parts = request.content.split(b"--" + boundary)
+            metadata = json.loads(parts[1].split(b"\r\n\r\n", 1)[1].removesuffix(b"\r\n"))
+            head, content = parts[2].split(b"\r\n\r\n", 1)
+            mime = head.decode().split("Content-Type: ")[1].strip()
+            return httpx.Response(200, json=self._finish(None, metadata, mime, content[:-2]))
+        if kind == "media":
+            file_id = path.removeprefix("files/")
+            mime = request.headers["Content-Type"]
+            return httpx.Response(200, json=self._finish(file_id, None, mime, request.content))
+        if kind == "resumable":
+            session = str(len(self.sessions))
+            updated = path.removeprefix("files/") if path != "files" else None
+            self.sessions[session] = {
+                "file_id": updated,
+                "metadata": json.loads(request.content) if updated is None else None,
+                "mime": request.headers["X-Upload-Content-Type"],
+                "content": b"",
+            }
+            location = f"https://www.googleapis.com/upload/drive/v3/session/{session}"
+            return httpx.Response(200, headers={"Location": location})
+        raise AssertionError(f"unexpected upload {request.url}")
+
+    def _chunk(self, request: httpx.Request, session_id: str) -> httpx.Response:
+        session = self.sessions[session_id]
+        session["content"] += request.content
+        span, total = request.headers["Content-Range"].removeprefix("bytes ").split("/")
+        if int(span.split("-")[1]) + 1 < int(total):
+            return httpx.Response(308)
+        raw = self._finish(
+            session["file_id"], session["metadata"], session["mime"], session["content"]
+        )
+        return httpx.Response(200, json=raw)
+
+    def _finish(
+        self, file_id: str | None, metadata: dict[str, Any] | None, mime: str, content: bytes
+    ) -> dict[str, Any]:
+        if file_id is None:
+            assert metadata is not None
+            return self.add(
+                self._new_id(), metadata["name"], metadata["parents"][0], mime=mime, content=content
+            )
+        self.content[file_id] = content
+        self.files[file_id]["modifiedTime"] = "2026-03-01T00:00:00Z"
+        return self.files[file_id]
 
     def client(self) -> GoogleDriveClient:
         transport = httpx.MockTransport(self.handler)
@@ -653,6 +740,130 @@ class TestBoundary:
     def test_export_formats_must_name_a_type_and_extension(self) -> None:
         with pytest.raises(ConfigurationError):
             GoogleDriveConnector(config(export_formats={DOC: "application/pdf"}))
+
+
+class TestWrite:
+    async def test_upload_creates_a_file_in_a_folder(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        connector = await connected(drive)
+
+        item = await connector.upload("Q1", "report.pdf", b"PDF")
+
+        assert item.name == "report.pdf" and item.path == "Q1" and item.mime_type == PDF
+        assert drive.content[item.id] == b"PDF"
+        assert drive.files[item.id]["parents"] == ["sub"]
+        assert drive.uploads == ["multipart"]
+
+    async def test_upload_creates_missing_folders_along_the_way(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        connector = await connected(drive)
+
+        item = await connector.upload("Out/2026/Oct", "a.csv", b"x,y", mime_type="text/csv")
+
+        assert item.path == "Out/2026/Oct" and item.mime_type == "text/csv"
+        assert (await connector.get_metadata(item.id)).path == "Out/2026/Oct"
+        again = await connector.upload("Out/2026/Oct", "b.csv", b"1")
+        assert again.parent_id == item.parent_id  # the folders made once are reused
+
+    async def test_a_taken_name_fails_replaces_or_renames(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        connector = await connected(drive)
+
+        with pytest.raises(ConflictError):
+            await connector.upload("", "a.pdf", b"new")
+
+        replaced = await connector.upload("", "a.pdf", b"new", on_conflict=ConflictBehavior.REPLACE)
+        assert replaced.id == "a" and drive.content["a"] == b"new"
+        assert drive.uploads[-1] == "media"
+
+        first = await connector.upload("", "a.pdf", b"1", on_conflict=ConflictBehavior.RENAME)
+        second = await connector.upload("", "a.pdf", b"2", on_conflict=ConflictBehavior.RENAME)
+        assert (first.name, second.name) == ("a (1).pdf", "a (2).pdf")
+
+    async def test_a_google_doc_or_a_folder_is_never_written_over(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        connector = await connected(drive)
+
+        with pytest.raises(ConflictError):
+            await connector.upload("Q1", "Notes", b"x", on_conflict=ConflictBehavior.REPLACE)
+        with pytest.raises(ConflictError):
+            await connector.upload("", "Q1", b"x", on_conflict=ConflictBehavior.REPLACE)
+        beside = await connector.upload("", "Q1", b"x", on_conflict=ConflictBehavior.RENAME)
+        assert beside.name == "Q1 (1)"
+
+    async def test_large_content_goes_up_in_a_resumable_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(drive_client, "SIMPLE_UPLOAD_LIMIT", 10)
+        monkeypatch.setattr(drive_client, "CHUNK_SIZE", 4)
+        drive = FakeDrive()
+        _tree(drive)
+        connector = await connected(drive)
+
+        created = await connector.upload("", "big.bin", b"0123456789AB")
+        replaced = await connector.upload(
+            "", "a.pdf", b"abcdefghijk", on_conflict=ConflictBehavior.REPLACE
+        )
+
+        assert drive.content[created.id] == b"0123456789AB"
+        assert drive.content[replaced.id] == b"abcdefghijk"
+        assert drive.uploads == ["resumable", "chunk", "chunk", "chunk"] * 2
+
+    async def test_writes_may_go_into_an_excluded_folder(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        connector = await connected(drive, excluded_paths=["Archive"])
+
+        item = await connector.upload("Archive", "out.pdf", b"x")
+        await connector.delete(item.id)
+
+        assert drive.files[item.id]["trashed"] is True
+
+    async def test_a_name_or_folder_that_would_lead_elsewhere_is_refused(self) -> None:
+        connector = await connected(FakeDrive())
+
+        with pytest.raises(ValueError):
+            await connector.upload("", "sub/escape.pdf", b"x")
+        with pytest.raises(NotFoundError):
+            await connector.upload("../elsewhere", "a.pdf", b"x")
+
+    async def test_create_folder_returns_an_existing_one_and_refuses_ambiguity(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        connector = await connected(drive)
+
+        assert (await connector.create_folder("Q1")).id == "sub"
+        made = await connector.create_folder("Q1/New")
+        assert made.type == ItemType.FOLDER and made.path == "Q1"
+        drive.add("sub2", "Q1", ROOT, folder=True)
+        with pytest.raises(DataSourceError, match="ambiguous"):
+            await connector.create_folder("Q1/Other")
+
+    async def test_delete_trashes_unless_permanent(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        connector = await connected(drive)
+
+        await connector.delete("a")
+        await connector.delete("b", permanent=True)
+
+        assert drive.files["a"]["trashed"] is True
+        assert "b" not in drive.files
+
+    async def test_delete_refuses_the_root_and_what_is_outside(self) -> None:
+        drive = FakeDrive()
+        _tree(drive)
+        connector = await connected(drive)
+
+        with pytest.raises(UnsupportedOperationError):
+            await connector.delete(ROOT)
+        with pytest.raises(NotFoundError):
+            await connector.delete("outside")
+        assert "outside" in drive.files and not drive.files["outside"]["trashed"]
 
 
 class TestSync:

@@ -4,17 +4,24 @@ import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, Protocol
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
 from data_sources.core.exceptions import (
     AuthenticationError,
+    ConflictError,
     DataSourceError,
     NotFoundError,
     RateLimitError,
 )
 from data_sources.core.logging import logger
+
+#: Content up to this size goes up in one request; above it, in an upload session.
+SIMPLE_UPLOAD_LIMIT = 4 * 1024 * 1024
+
+#: One upload-session chunk — Graph needs a multiple of 320 KiB.
+CHUNK_SIZE = 32 * 320 * 1024
 
 
 class GraphCredential(Protocol):
@@ -57,6 +64,9 @@ class SharepointClient:
         if response.status_code in (401, 403):
             self.logger.error(f"Graph API rejected credentials: {response.text}")
             raise AuthenticationError(f"Graph API rejected credentials: {response.text}")
+        if response.status_code == 409:
+            self.logger.warning(f"Graph API conflict: {response.text}")
+            raise ConflictError(f"Graph API conflict: {response.text}")
         if response.status_code in (404, 410):
             self.logger.warning(f"Graph API item not found: {response.request.url}")
             raise NotFoundError(f"Graph API item not found: {response.request.url}")
@@ -64,9 +74,25 @@ class SharepointClient:
             self.logger.error(f"Graph API error {response.status_code}: {response.text}")
             raise DataSourceError(f"Graph API error {response.status_code}: {response.text}")
 
-    async def get_json(self, url: str, max_retries: int = 10) -> dict[str, Any]:
+    async def send(
+        self,
+        method: str,
+        url: str,
+        *,
+        json: dict[str, Any] | None = None,
+        content: bytes | None = None,
+        headers: dict[str, str] | None = None,
+        authenticated: bool = True,
+        max_retries: int = 10,
+    ) -> httpx.Response:
+        """One call to `url`, retried while Graph throttles, raising on an error status.
+        `authenticated=False` for a pre-authorized URL (an upload session's), which must not
+        be sent the access token."""
         for attempt in range(max_retries):
-            response = await self._http.get(url, headers=await self._auth_header())
+            auth = await self._auth_header() if authenticated else {}
+            response = await self._http.request(
+                method, url, json=json, content=content, headers={**(headers or {}), **auth}
+            )
 
             if response.status_code == 429:
                 retry_after = float(response.headers.get("Retry-After", 2 ** min(attempt, 6)))
@@ -75,10 +101,14 @@ class SharepointClient:
                 continue
 
             self._raise_for_status(response)
-            body: dict[str, Any] = response.json()
-            return body
+            return response
 
         raise RateLimitError(f"Graph API throttled '{url}' after {max_retries} retries")
+
+    async def get_json(self, url: str, max_retries: int = 10) -> dict[str, Any]:
+        response = await self.send("GET", url, max_retries=max_retries)
+        body: dict[str, Any] = response.json()
+        return body
 
     async def _paginate(self, url: str) -> AsyncIterator[dict[str, Any]]:
         next_url: str | None = url
@@ -140,10 +170,68 @@ class SharepointClient:
     @staticmethod
     def _anchor(item_path: str) -> str:
         """Graph's address for the folder at `item_path` — the drive's own `root` for none."""
-        return f"root:/{item_path.strip('/')}:" if item_path.strip("/") else "root"
+        return f"root:/{quote(item_path.strip('/'))}:" if item_path.strip("/") else "root"
 
     async def get_folder(self, drive_id: str, item_path: str) -> dict[str, Any]:
         return await self.get_json(f"{self.BASE_URL}/drives/{drive_id}/{self._anchor(item_path)}")
+
+    def path_url(self, drive_id: str, item_path: str) -> str:
+        """Graph's address for whatever is at `item_path` in the drive, each segment encoded."""
+        return f"{self.BASE_URL}/drives/{drive_id}/root:/{quote(item_path.strip('/'))}:"
+
+    async def create_folder(self, drive_id: str, parent_path: str, name: str) -> dict[str, Any]:
+        """Create the folder `name` in the one at `parent_path`; `ConflictError` when the
+        name is taken."""
+        response = await self.send(
+            "POST",
+            self.children_url(drive_id, parent_path),
+            json={"name": name, "folder": {}, "@microsoft.graph.conflictBehavior": "fail"},
+        )
+        return dict(response.json())
+
+    async def upload(
+        self, drive_id: str, item_path: str, content: bytes, mime_type: str, conflict: str
+    ) -> dict[str, Any]:
+        """Write `content` at `item_path` — in one request up to `SIMPLE_UPLOAD_LIMIT`, in an
+        upload session above it; `conflict` is Graph's `fail`, `replace` or `rename`."""
+        if len(content) <= SIMPLE_UPLOAD_LIMIT:
+            response = await self.send(
+                "PUT",
+                f"{self.path_url(drive_id, item_path)}/content"
+                f"?@microsoft.graph.conflictBehavior={conflict}",
+                content=content,
+                headers={"Content-Type": mime_type},
+            )
+            return dict(response.json())
+
+        session = await self.send(
+            "POST",
+            f"{self.path_url(drive_id, item_path)}/createUploadSession",
+            json={"item": {"@microsoft.graph.conflictBehavior": conflict}},
+        )
+        upload_url = str(session.json()["uploadUrl"])
+        total = len(content)
+        response = session
+        for start in range(0, total, CHUNK_SIZE):
+            chunk = content[start : start + CHUNK_SIZE]
+            response = await self.send(
+                "PUT",
+                upload_url,
+                content=chunk,
+                headers={"Content-Range": f"bytes {start}-{start + len(chunk) - 1}/{total}"},
+                authenticated=False,
+            )
+        if response.status_code not in (200, 201):
+            raise DataSourceError(f"Graph upload session ended with {response.status_code}")
+        return dict(response.json())
+
+    async def delete_item(self, drive_id: str, item_id: str, *, permanent: bool) -> None:
+        """Delete `item_id` — to the site's recycle bin, unless `permanent`."""
+        url = f"{self.BASE_URL}/drives/{drive_id}/items/{item_id}"
+        if permanent:
+            await self.send("POST", f"{url}/permanentDelete")
+        else:
+            await self.send("DELETE", url)
 
     def children_url(self, drive_id: str, item_path: str) -> str:
         return f"{self.BASE_URL}/drives/{drive_id}/{self._anchor(item_path)}/children"

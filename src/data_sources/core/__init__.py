@@ -2,6 +2,7 @@ from data_sources.core.connector import Connector
 from data_sources.core.exceptions import (
     AuthenticationError,
     ConfigurationError,
+    ConflictError,
     ConnectionError,
     ConnectorNotFoundError,
     DataSourceError,
@@ -14,6 +15,7 @@ from data_sources.core.exceptions import (
 from data_sources.core.models import (
     Change,
     ChangeType,
+    ConflictBehavior,
     Hash,
     HashAlgorithm,
     Item,
@@ -37,6 +39,8 @@ __all__ = [
     "Change",
     "ChangeType",
     "ConfigurationError",
+    "ConflictBehavior",
+    "ConflictError",
     "ConnectionError",
     "Connector",
     "ConnectorNotFoundError",

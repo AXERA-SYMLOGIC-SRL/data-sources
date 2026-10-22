@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import posixpath
 from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -102,6 +103,38 @@ class FTPClient:
         except aioftp.StatusCodeError as exc:
             self.logger.warning(f"FTP path not found: {path}")
             raise NotFoundError(f"FTP path not found: {path}") from exc
+
+    @asynccontextmanager
+    async def _errors(self, action: str, path: str) -> AsyncIterator[None]:
+        try:
+            yield
+        except aioftp.StatusCodeError as exc:
+            self.logger.error(f"FTP error trying to {action} {path}: {exc}")
+            raise DataSourceError(f"FTP error trying to {action} {path}: {exc}") from exc
+
+    async def mkdir(self, path: str) -> None:
+        async with self._errors("create", path):
+            await self._client.make_directory(path, parents=False)
+
+    async def write(self, path: str, content: bytes) -> None:
+        async with self._errors("write", path), self._client.upload_stream(path) as stream:
+            await stream.write(content)
+
+    async def rename(self, source: str, target: str, *, overwrite: bool) -> None:
+        """FTP's rename may or may not replace a file in the way, by server — with
+        `overwrite`, the old one is removed first (not atomic)."""
+        async with self._errors("rename", source):
+            if overwrite and await self._client.exists(target):
+                await self._client.remove_file(target)
+            await self._client.rename(source, target)
+
+    async def remove(self, path: str) -> None:
+        async with self._errors("remove", path):
+            await self._client.remove_file(path)
+
+    async def rmdir(self, path: str) -> None:
+        async with self._errors("remove", path):
+            await self._client.remove_directory(path)
 
 
 def _to_entry(path: str, info: Mapping[str, Any]) -> RemoteEntry:

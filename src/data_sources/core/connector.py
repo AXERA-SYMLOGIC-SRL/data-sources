@@ -11,6 +11,7 @@ from data_sources.core.exceptions import UnsupportedOperationError
 from data_sources.core.models import (
     Change,
     ChangeType,
+    ConflictBehavior,
     Item,
     ItemPage,
     Permission,
@@ -34,6 +35,7 @@ class Connector(ABC):
     supports_permissions: ClassVar[bool] = False
     supports_webhooks: ClassVar[bool] = False
     supports_item_lookup: ClassVar[bool] = False
+    supports_write: ClassVar[bool] = False
 
     #: ORM models (subclasses of `data_sources.store.models.Base`) this connector persists.
     #: Declared per-class; a `Store` creates their tables/indexes when the connector is
@@ -99,6 +101,38 @@ class Connector(ABC):
     @abstractmethod
     def download(self, item: Item) -> AsyncIterator[bytes]:
         """Stream the content of `item`."""
+
+    async def upload(
+        self,
+        folder: str | None,
+        name: str,
+        content: bytes,
+        *,
+        mime_type: str | None = None,
+        on_conflict: ConflictBehavior = ConflictBehavior.FAIL,
+    ) -> Item:
+        """Write `content` as the file `name` in the folder at `folder` (relative to the
+        connected one, `None` for it), creating missing folders along the way, and return
+        the file written. A taken name raises `ConflictError`, is written over, or is
+        written beside under a free name, as `on_conflict` says.
+
+        Writes stay inside the connected folder but may go into an excluded one — an
+        output folder kept out of what is read is a common destination.
+        Only available when `supports_write` is True.
+        """
+        raise UnsupportedOperationError(f"{self.provider} does not support writing")
+
+    async def create_folder(self, path: str) -> Item:
+        """Create the folder at `path` (relative to the connected one) and any missing
+        above it; an existing one is returned as is. Only available when `supports_write`
+        is True."""
+        raise UnsupportedOperationError(f"{self.provider} does not support writing")
+
+    async def delete(self, item_id: str, *, permanent: bool = False) -> None:
+        """Delete the file or folder `item_id` inside the connected folder (never the folder
+        itself) — to the provider's bin unless `permanent`, where it has one. Only available
+        when `supports_write` is True."""
+        raise UnsupportedOperationError(f"{self.provider} does not support writing")
 
     def sync(self, cursor: SyncCursor | None = None) -> AsyncIterator[Change]:
         """Yield changes since `cursor`. Only available when `supports_sync` is True."""

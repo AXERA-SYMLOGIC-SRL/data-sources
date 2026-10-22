@@ -21,12 +21,15 @@ from data_sources.connectors.sftp.sftp_client import SFTPClient
 from data_sources.core.exceptions import (
     AuthenticationError,
     ConfigurationError,
+    ConflictError,
+    DataSourceError,
     NotFoundError,
+    UnsupportedOperationError,
 )
 from data_sources.core.exceptions import (
     ConnectionError as DataSourceConnectionError,
 )
-from data_sources.core.models import ChangeType, Item, ItemType, SyncCursor
+from data_sources.core.models import ChangeType, ConflictBehavior, Item, ItemType, SyncCursor
 from data_sources.store import init_connector, init_store
 
 SFTP_URL = "sftp://sftp.example.com/data"
@@ -98,8 +101,89 @@ class FakeRemoteClient:
         for chunk in (b"chunk-1", b"chunk-2"):
             yield chunk
 
+    async def mkdir(self, path: str) -> None:
+        raise NotImplementedError
+
+    async def write(self, path: str, content: bytes) -> None:
+        raise NotImplementedError
+
+    async def rename(self, source: str, target: str, *, overwrite: bool) -> None:
+        raise NotImplementedError
+
+    async def remove(self, path: str) -> None:
+        raise NotImplementedError
+
+    async def rmdir(self, path: str) -> None:
+        raise NotImplementedError
+
     async def close(self) -> None:
         self.closed = True
+
+
+class WritableRemote(FakeRemoteClient):
+    """A server with a real (in-memory) tree under `/data` — `None` for a directory, the
+    bytes for a file — for the write paths, which look before they write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tree: dict[str, bytes | None] = {"/": None, "/data": None}
+        self.fail_rename = False
+
+    def _entry_at(self, path: str) -> RemoteEntry:
+        if path in self.links:
+            return _entry(path, permissions=stat_module.S_IFLNK | 0o777)
+        if path not in self.tree:
+            raise NotFoundError(path)
+        content = self.tree[path]
+        return _entry(path, is_dir=content is None, size=len(content or b""))
+
+    async def stat(self, path: str) -> RemoteEntry:
+        return self._entry_at(path)
+
+    async def lstat(self, path: str) -> RemoteEntry:
+        return self._entry_at(path)
+
+    async def listdir(self, path: str) -> AsyncIterator[RemoteEntry]:
+        for child in sorted(self.tree):
+            if posixpath.dirname(child) == path and child != path:
+                yield self._entry_at(child)
+
+    async def mkdir(self, path: str) -> None:
+        if path in self.tree or self.tree.get(posixpath.dirname(path), b"") is not None:
+            raise DataSourceError(f"can't create {path}")
+        self.tree[path] = None
+
+    async def write(self, path: str, content: bytes) -> None:
+        if self.tree.get(posixpath.dirname(path), b"") is not None:
+            raise NotFoundError(path)
+        self.tree[path] = content
+
+    async def rename(self, source: str, target: str, *, overwrite: bool) -> None:
+        if self.fail_rename:
+            raise DataSourceError("rename refused")
+        if target in self.tree and not overwrite:
+            raise DataSourceError(f"{target} exists")
+        self.tree[target] = self.tree.pop(source)
+
+    async def remove(self, path: str) -> None:
+        del self.tree[path]
+
+    async def rmdir(self, path: str) -> None:
+        if any(posixpath.dirname(child) == path for child in self.tree if child != path):
+            raise DataSourceError(f"{path} is not empty")
+        del self.tree[path]
+
+    async def download(self, path: str) -> AsyncIterator[bytes]:
+        yield self.tree[path] or b""
+
+
+def writable(**options: Any) -> tuple[SFTPConnector, WritableRemote]:
+    connector = SFTPConnector(
+        ConnectorConfig(provider="sftp", options={"url": SFTP_URL, **options})
+    )
+    remote = WritableRemote()
+    connector._client = cast(RemoteClient, remote)
+    return connector, remote
 
 
 def make_connector(url: str = SFTP_URL, **options: Any) -> tuple[SFTPConnector, FakeRemoteClient]:
@@ -332,6 +416,108 @@ class TestBoundary:
 
         assert [item.id async for item in connector.list()] == ["/data/a.txt"]
         assert (await connector.get_metadata("/data/a.txt")).name == "a.txt"
+
+
+class TestWrite:
+    @pytest.mark.asyncio
+    async def test_upload_makes_folders_and_leaves_no_temporary_file(self) -> None:
+        connector, remote = writable()
+
+        item = await connector.upload("out/2026", "report.pdf", b"PDF")
+
+        assert item.id == "/data/out/2026/report.pdf" and item.size == 3
+        assert remote.tree["/data/out/2026/report.pdf"] == b"PDF"
+        assert remote.tree["/data/out"] is None
+        assert not [path for path in remote.tree if path.endswith(".part")]
+
+    @pytest.mark.asyncio
+    async def test_a_taken_name_fails_replaces_or_renames(self) -> None:
+        connector, remote = writable()
+        await connector.upload("", "a.txt", b"1")
+
+        with pytest.raises(ConflictError):
+            await connector.upload("", "a.txt", b"2")
+        await connector.upload("", "a.txt", b"2", on_conflict=ConflictBehavior.REPLACE)
+        first = await connector.upload("", "a.txt", b"3", on_conflict=ConflictBehavior.RENAME)
+        second = await connector.upload("", "a.txt", b"4", on_conflict=ConflictBehavior.RENAME)
+
+        assert remote.tree["/data/a.txt"] == b"2"
+        assert (first.name, second.name) == ("a (1).txt", "a (2).txt")
+
+    @pytest.mark.asyncio
+    async def test_a_folder_or_symlink_is_never_written_over(self) -> None:
+        connector, remote = writable()
+        await connector.create_folder("sub")
+        remote.links = {"/data/link.txt": "/etc/passwd"}
+
+        with pytest.raises(ConflictError):
+            await connector.upload("", "sub", b"x", on_conflict=ConflictBehavior.REPLACE)
+        with pytest.raises(ConflictError):
+            await connector.upload("", "link.txt", b"x", on_conflict=ConflictBehavior.REPLACE)
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_created_through_a_symlink_or_over_a_file(self) -> None:
+        connector, remote = writable()
+        remote.links = {"/data/escape": "/etc"}
+        remote.tree["/data/file.txt"] = b"x"
+
+        with pytest.raises(NotFoundError):
+            await connector.upload("escape/new", "a.txt", b"x")
+        with pytest.raises(ConflictError):
+            await connector.create_folder("file.txt/sub")
+        assert "/data/escape/new" not in remote.tree
+
+    @pytest.mark.asyncio
+    async def test_a_failed_rename_removes_the_temporary_file(self) -> None:
+        connector, remote = writable()
+        remote.fail_rename = True
+
+        with pytest.raises(DataSourceError):
+            await connector.upload("", "a.txt", b"x")
+        assert set(remote.tree) == {"/", "/data"}
+
+    @pytest.mark.asyncio
+    async def test_a_name_or_folder_that_would_lead_elsewhere_is_refused(self) -> None:
+        connector, _ = writable()
+
+        with pytest.raises(ValueError):
+            await connector.upload("", "sub/escape.txt", b"x")
+        with pytest.raises(NotFoundError):
+            await connector.upload("../etc", "a.txt", b"x")
+
+    @pytest.mark.asyncio
+    async def test_writes_may_go_into_an_excluded_folder(self) -> None:
+        connector, remote = writable(excluded_paths=["out"])
+
+        item = await connector.upload("out", "a.txt", b"x")
+        await connector.delete(item.id)
+
+        assert "/data/out/a.txt" not in remote.tree
+
+    @pytest.mark.asyncio
+    async def test_delete_removes_files_and_empty_folders(self) -> None:
+        connector, remote = writable()
+        await connector.upload("sub", "a.txt", b"x")
+
+        with pytest.raises(DataSourceError):
+            await connector.delete("sub")
+        await connector.delete("/data/sub/a.txt")
+        await connector.delete("sub")
+
+        assert set(remote.tree) == {"/", "/data"}
+
+    @pytest.mark.asyncio
+    async def test_delete_refuses_the_root_a_symlink_and_what_is_outside(self) -> None:
+        connector, remote = writable()
+        remote.links = {"/data/link.txt": "/data/real.txt"}
+        remote.tree["/data/real.txt"] = b"x"
+
+        with pytest.raises(UnsupportedOperationError):
+            await connector.delete("/data")
+        with pytest.raises(NotFoundError):
+            await connector.delete("/data/link.txt")
+        with pytest.raises(NotFoundError):
+            await connector.delete("/etc/passwd")
 
 
 class TestSync:
@@ -568,6 +754,42 @@ async def _start_ftp_server() -> tuple[aioftp.Server, int]:
     return server, port
 
 
+class TestSFTPClientWrites:
+    @pytest.mark.asyncio
+    async def test_overwriting_rename_uses_posix_rename(self) -> None:
+        mock_sftp = AsyncMock()
+        client = SFTPClient(AsyncMock(), mock_sftp)
+
+        await client.rename("/data/.a.part", "/data/a.txt", overwrite=True)
+
+        mock_sftp.posix_rename.assert_awaited_once_with("/data/.a.part", "/data/a.txt")
+        mock_sftp.rename.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_overwriting_rename_falls_back_without_posix_rename(self) -> None:
+        mock_sftp = AsyncMock()
+        mock_sftp.posix_rename = AsyncMock(side_effect=asyncssh.SFTPOpUnsupported("no"))
+        mock_sftp.exists = AsyncMock(return_value=True)
+        client = SFTPClient(AsyncMock(), mock_sftp)
+
+        await client.rename("/data/.a.part", "/data/a.txt", overwrite=True)
+
+        mock_sftp.remove.assert_awaited_once_with("/data/a.txt")
+        mock_sftp.rename.assert_awaited_once_with("/data/.a.part", "/data/a.txt")
+
+    @pytest.mark.asyncio
+    async def test_sftp_errors_are_wrapped(self) -> None:
+        mock_sftp = AsyncMock()
+        mock_sftp.mkdir = AsyncMock(side_effect=asyncssh.SFTPFailure("exists"))
+        mock_sftp.remove = AsyncMock(side_effect=asyncssh.SFTPNoSuchFile("gone"))
+        client = SFTPClient(AsyncMock(), mock_sftp)
+
+        with pytest.raises(DataSourceError):
+            await client.mkdir("/data/out")
+        with pytest.raises(NotFoundError):
+            await client.remove("/data/gone.txt")
+
+
 class TestFTPClientAgainstAioftp:
     @pytest.mark.asyncio
     async def test_stat_list_walk_and_download_roundtrip(self) -> None:
@@ -594,6 +816,31 @@ class TestFTPClientAgainstAioftp:
 
                 chunks = [chunk async for chunk in client.download("/a.txt")]
                 assert b"".join(chunks) == b"hello world"
+            finally:
+                await client.close()
+        finally:
+            await server.close()
+
+    @pytest.mark.asyncio
+    async def test_mkdir_write_rename_and_remove_roundtrip(self) -> None:
+        server, port = await _start_ftp_server()
+        try:
+            client = await FTPClient.connect("127.0.0.1", port, "anonymous", password="anon@")
+            try:
+                await client.mkdir("/out")
+                await client.write("/out/.a.part", b"first")
+                await client.rename("/out/.a.part", "/out/a.txt", overwrite=False)
+                await client.write("/out/.b.part", b"second")
+                await client.rename("/out/.b.part", "/out/a.txt", overwrite=True)
+
+                chunks = [chunk async for chunk in client.download("/out/a.txt")]
+                assert b"".join(chunks) == b"second"
+                assert [entry.path async for entry in client.listdir("/out")] == ["/out/a.txt"]
+
+                await client.remove("/out/a.txt")
+                await client.rmdir("/out")
+                with pytest.raises(NotFoundError):
+                    await client.stat("/out")
             finally:
                 await client.close()
         finally:

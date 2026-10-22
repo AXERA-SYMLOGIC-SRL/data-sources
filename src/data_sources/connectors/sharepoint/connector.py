@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import mimetypes
 import secrets
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -20,14 +21,17 @@ from data_sources.connectors.sharepoint.models import (
 from data_sources.core.connector import Connector
 from data_sources.core.exceptions import (
     ConfigurationError,
+    ConflictError,
     ConnectionError,
     DataSourceError,
     NotFoundError,
+    UnsupportedOperationError,
 )
 from data_sources.core.logging import logger
 from data_sources.core.models import (
     Change,
     ChangeType,
+    ConflictBehavior,
     Hash,
     HashAlgorithm,
     Item,
@@ -37,7 +41,7 @@ from data_sources.core.models import (
     SyncCursor,
 )
 from data_sources.core.paging import check_page_size
-from data_sources.core.paths import is_excluded, join, relative_path
+from data_sources.core.paths import check_name, is_excluded, join, relative_path
 from data_sources.core.registry import register_connector
 
 GRAPH_SCOPES = ["https://graph.microsoft.com/.default"]
@@ -80,6 +84,7 @@ class SharePointConnector(Connector):
     supports_sync = True
     supports_item_lookup = True
     supports_webhooks = True
+    supports_write = True
     models = (SharePointSyncState, SharePointItemRecord, SharePointWebhookState)
 
     def __init__(self, config: ConnectorConfig) -> None:
@@ -227,13 +232,82 @@ class SharePointConnector(Connector):
     async def get_metadata(self, item_id: str) -> Item:
         """`item_id`'s metadata, refused (`NotFoundError`) unless it is the root folder or
         a live, non-excluded item whose Graph path lies under it."""
+        return self._to_item(await self._checked(item_id))
+
+    async def _checked(self, item_id: str, *, allow_excluded: bool = False) -> dict[str, Any]:
+        """`item_id`'s Graph entry, refused unless it is the root folder or a live item
+        whose Graph path lies under it — and, unless `allow_excluded` (writes), not in an
+        excluded folder."""
         raw = await self.client.get_item_by_id(self._resolved_drive_id, item_id)
-        if self._root_item_id is not None and raw.get("id") == self._root_item_id:
-            return self._to_item(raw)
+        if self._is_root(raw):
+            return raw
         parent = self._parent_path(raw)
-        if parent is None or "deleted" in raw or is_excluded(parent, self._excluded_paths):
+        if (
+            parent is None
+            or "deleted" in raw
+            or (not allow_excluded and is_excluded(parent, self._excluded_paths))
+        ):
             raise NotFoundError(f"{item_id!r} is not inside the connected folder")
-        return self._to_item(raw)
+        return raw
+
+    def _is_root(self, raw: dict[str, Any]) -> bool:
+        return self._root_item_id is not None and raw.get("id") == self._root_item_id
+
+    async def upload(
+        self,
+        folder: str | None,
+        name: str,
+        content: bytes,
+        *,
+        mime_type: str | None = None,
+        on_conflict: ConflictBehavior = ConflictBehavior.FAIL,
+    ) -> Item:
+        """See `Connector.upload` — Graph settles a taken name itself (its
+        `conflictBehavior`). Needs `Sites.ReadWrite.All`, or `Sites.Selected` with `write`."""
+        relative = relative_path(folder)
+        check_name(name)
+        if relative:
+            await self.create_folder(relative)
+        raw = await self.client.upload(
+            self._resolved_drive_id,
+            join(self._drive_path(relative).strip("/"), name),
+            content,
+            mime_type or mimetypes.guess_type(name)[0] or "application/octet-stream",
+            on_conflict.value,
+        )
+        return self._to_item(raw).model_copy(update={"path": relative})
+
+    async def create_folder(self, path: str) -> Item:
+        relative = relative_path(path)
+        raw = await self.client.get_folder(self._resolved_drive_id, self._root_path)
+        walked = ""
+        for part in [segment for segment in relative.split("/") if segment]:
+            parent, walked = walked, join(walked, part)
+            try:
+                raw = await self.client.get_folder(
+                    self._resolved_drive_id, self._drive_path(walked)
+                )
+            except NotFoundError:
+                try:
+                    raw = await self.client.create_folder(
+                        self._resolved_drive_id, self._drive_path(parent), part
+                    )
+                except ConflictError:  # made meanwhile by someone else
+                    raw = await self.client.get_folder(
+                        self._resolved_drive_id, self._drive_path(walked)
+                    )
+            if "folder" not in raw:
+                raise ConflictError(f"{walked!r} is a file, not a folder")
+        item = self._to_item(raw)
+        return item.model_copy(update={"path": relative.rpartition("/")[0]})
+
+    async def delete(self, item_id: str, *, permanent: bool = False) -> None:
+        """See `Connector.delete`: to the site's recycle bin unless `permanent`. A folder
+        goes with everything in it."""
+        raw = await self._checked(item_id, allow_excluded=True)
+        if self._is_root(raw):
+            raise UnsupportedOperationError("the connected folder itself can't be deleted")
+        await self.client.delete_item(self._resolved_drive_id, str(raw["id"]), permanent=permanent)
 
     async def download(self, item: Item) -> AsyncIterator[bytes]:
         # Checked again by id, whatever `item` says: the caller may have kept it from before

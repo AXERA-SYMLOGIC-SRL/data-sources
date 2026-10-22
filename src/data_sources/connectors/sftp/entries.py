@@ -48,4 +48,24 @@ class RemoteClient(Protocol):
 
     def download(self, path: str) -> AsyncIterator[bytes]: ...
 
+    async def mkdir(self, path: str) -> None:
+        """Create the one directory `path` (its parent must exist)."""
+        ...
+
+    async def write(self, path: str, content: bytes) -> None:
+        """Write `content` as the file `path`, creating or truncating it."""
+        ...
+
+    async def rename(self, source: str, target: str, *, overwrite: bool) -> None:
+        """Move `source` to `target`, replacing a file there only when `overwrite`."""
+        ...
+
+    async def remove(self, path: str) -> None:
+        """Delete the file `path`."""
+        ...
+
+    async def rmdir(self, path: str) -> None:
+        """Delete the empty directory `path`."""
+        ...
+
     async def close(self) -> None: ...

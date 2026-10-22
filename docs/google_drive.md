@@ -66,7 +66,8 @@ config = ConnectorConfig(
 
 **`type="oauth"`** uses a user's consent, kept as its refresh token. This is what a
 "Connect Google" button produces. The connector acts as that user, within the scopes they
-consented to. `https://www.googleapis.com/auth/drive.readonly` covers everything here.
+consented to. `https://www.googleapis.com/auth/drive.readonly` covers reading;
+[writing](#writing) needs `https://www.googleapis.com/auth/drive`.
 Requires `client_id`, `client_secret` and `refresh_token`. Running the consent flow
 (authorize URL, redirect, code exchange) is the caller's job.
 
@@ -142,6 +143,37 @@ of those folders is placed again by its current ancestry before it is read. A fo
 isn't inside the connected folder, whether forged into a token or moved out since, is
 skipped rather than listed. A token from another listing (another path, or `recursive`
 differing) raises `InvalidPageTokenError`.
+
+## Writing
+
+```python
+from data_sources.core import ConflictBehavior
+
+item = await connector.upload("Out/2026", "report.pdf", pdf_bytes)  # folders made as needed
+item = await connector.upload("Out/2026", "report.pdf", newer, on_conflict=ConflictBehavior.REPLACE)
+await connector.create_folder("Out/2027")
+await connector.delete(item.id)  # to Drive's bin; permanent=True deletes outright
+```
+
+- Writing needs the `drive` scope. Through a service account, pass it in
+  `auth.credentials.scopes`. A token without it gets `AuthenticationError` on the first
+  write.
+- Drive allows two files with the same name in a folder, so the connector checks for the
+  name first. A file **or folder** with the name counts as taken:
+  - `FAIL` (the default) raises `ConflictError`.
+  - `REPLACE` writes new content over the file, keeping its id and revision history. It
+    refuses a folder, a Google-native file (which has no bytes to write over), or two
+    files sharing the name.
+  - `RENAME` writes beside it as `report (1).pdf`, `report (2).pdf`, and so on.
+
+  Checking and writing aren't one atomic step, so two writers racing can still end up
+  with two files of the same name.
+- Content over 5 MB goes up in a resumable session, in 8 MB chunks.
+- Writes stay inside the connected folder but may go into an excluded one. An output
+  folder kept out of what is read is a common destination.
+- A file the connector writes shows up in its own `sync()` like any other change.
+- `delete` refuses the connected folder itself and anything outside it. A folder is
+  deleted together with its contents.
 
 ## Incremental sync
 

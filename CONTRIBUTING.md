@@ -36,6 +36,10 @@ Connectors live under `src/data_sources/connectors/<provider>/` and implement th
   from the start on every call. Keep the token opaque (`core.paging.encode_token`), and
   check what it names: a token is caller input, so a forged one must not reach outside
   the connected folder or make the connector call any URL but its own.
+- Opt into `supports_write` only with `upload`, `create_folder` and `delete` implemented.
+  Writes stay inside the connected folder but may go into excluded ones, and `upload`
+  honours `ConflictBehavior` (`core.paths.renamed` builds `name (n).ext`) and refuses a
+  name holding a `/` (`core.paths.check_name`).
 - Enforce the connected folder as a boundary in `get_metadata`, `download` and
   `list(path)` (`path` is relative to it; see `core.paths`), whatever id or path the
   caller passes.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,19 +11,22 @@ import httpx
 import pytest
 
 from data_sources.config.schema import AuthConfig, ConnectorConfig, StoreConfig
+from data_sources.connectors.sharepoint import client as sharepoint_client
 from data_sources.connectors.sharepoint.client import SharepointClient
 from data_sources.connectors.sharepoint.connector import SharePointConnector
 from data_sources.connectors.sharepoint.models import SharePointItemRecord, SharePointSyncState
 from data_sources.core.exceptions import (
     AuthenticationError,
     ConfigurationError,
+    ConflictError,
     InvalidPageTokenError,
     NotFoundError,
+    UnsupportedOperationError,
 )
 from data_sources.core.exceptions import (
     ConnectionError as DataSourceConnectionError,
 )
-from data_sources.core.models import ChangeType, Item, ItemType, SyncCursor
+from data_sources.core.models import ChangeType, ConflictBehavior, Item, ItemType, SyncCursor
 from data_sources.store import init_connector, init_store
 
 SHARE_URL = (
@@ -1184,3 +1188,205 @@ class TestSharepointClientAgainstGraph:
         results = [item async for item in client.list_subscriptions()]
 
         assert [item["id"] for item in results] == ["sub-1", "sub-2"]
+
+
+class FakeGraph:
+    """Graph's write surface over one drive: folders and files by drive path, uploads
+    (simple and by session), deletes. The connector's root is `Reports/Q1`."""
+
+    def __init__(self) -> None:
+        self.folders: dict[str, str] = {"": "drive-root", "Reports": "f-reports"}
+        self.folders["Reports/Q1"] = "root-item"
+        self.files: dict[str, dict[str, Any]] = {}
+        self.deleted: list[tuple[str, str]] = []
+        self.chunks: list[httpx.Request] = []
+        #: The upload session open: its file's drive path and conflict behavior.
+        self.session: tuple[str, str] = ("", "")
+        self.ids = 0
+
+    def _id(self) -> str:
+        self.ids += 1
+        return f"id{self.ids}"
+
+    def _folder(self, path: str) -> dict[str, Any]:
+        parent, _, name = path.rpartition("/")
+        return {
+            "id": self.folders[path],
+            "name": name or "root",
+            "folder": {"childCount": 0},
+            "parentReference": {"path": f"/drives/drive1/root:/{parent}".rstrip("/")},
+        }
+
+    def _file(self, path: str, content: bytes) -> dict[str, Any]:
+        parent, _, name = path.rpartition("/")
+        existing = self.files.get(path)
+        raw = {
+            "id": existing["id"] if existing else self._id(),
+            "name": name,
+            "size": len(content),
+            "file": {"mimeType": "application/pdf"},
+            "parentReference": {"path": f"/drives/drive1/root:/{parent}"},
+            "content": content.decode(),
+        }
+        self.files[path] = raw
+        return raw
+
+    def _write_file(self, path: str, content: bytes, conflict: str) -> httpx.Response:
+        if path in self.files or path in self.folders:
+            if conflict == "fail" or path in self.folders:
+                return httpx.Response(409, json={"error": {"code": "nameAlreadyExists"}})
+            if conflict == "rename":
+                stem, _, extension = path.rpartition(".")
+                path = f"{stem} 1.{extension}"
+        return httpx.Response(201, json=self._file(path, content))
+
+    def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.url.host == "upload.example":
+            self.chunks.append(request)
+            span, total = request.headers["Content-Range"].removeprefix("bytes ").split("/")
+            if int(span.split("-")[1]) + 1 < int(total):
+                return httpx.Response(202, json={})
+            content = b"".join(chunk.content for chunk in self.chunks)
+            return self._write_file(self.session[0], content, self.session[1])
+
+        path = request.url.path.removeprefix("/v1.0/drives/drive1/")
+        if path == "root" and request.method == "GET":
+            return httpx.Response(200, json=self._folder(""))
+        if path.startswith("items/"):
+            item_id = path.removeprefix("items/").removesuffix("/permanentDelete")
+            if request.method == "GET":
+                found = [raw for raw in self.files.values() if raw["id"] == item_id]
+                found += [self._folder(p) for p, i in self.folders.items() if i == item_id]
+                return httpx.Response(200, json=found[0]) if found else httpx.Response(404)
+            self.deleted.append(
+                (item_id, "permanent" if path.endswith("permanentDelete") else "bin")
+            )
+            return httpx.Response(204)
+
+        match = re.fullmatch(r"root:/(.*?):(/children|/content|/createUploadSession)?", path)
+        assert match, f"unexpected request {request.method} {request.url}"
+        target, action = match.group(1), match.group(2)
+        conflict = request.url.params.get("@microsoft.graph.conflictBehavior", "fail")
+        if action is None:
+            if target in self.folders:
+                return httpx.Response(200, json=self._folder(target))
+            if target in self.files:
+                return httpx.Response(200, json=self.files[target])
+            return httpx.Response(404, json={})
+        if action == "/children":
+            name = json.loads(request.content)["name"]
+            child = f"{target}/{name}"
+            if child in self.folders or child in self.files:
+                return httpx.Response(409, json={"error": {"code": "nameAlreadyExists"}})
+            self.folders[child] = self._id()
+            return httpx.Response(201, json=self._folder(child))
+        if action == "/content":
+            return self._write_file(target, request.content, conflict)
+        body = json.loads(request.content)
+        self.session = (target, body["item"]["@microsoft.graph.conflictBehavior"])
+        return httpx.Response(200, json={"uploadUrl": "https://upload.example/session/1"})
+
+
+def _writable(graph: FakeGraph, **options: Any) -> SharePointConnector:
+    connector, _ = make_connector(**options)
+    connector._client = SharepointClient(
+        FakeCredential(),
+        ["scope"],
+        http=httpx.AsyncClient(transport=httpx.MockTransport(graph.handler)),
+    )
+    connector._root_item_id = "root-item"
+    return connector
+
+
+class TestWrite:
+    @pytest.mark.asyncio
+    async def test_upload_writes_into_a_folder_made_along_the_way(self) -> None:
+        graph = FakeGraph()
+        connector = _writable(graph)
+
+        item = await connector.upload("Out/2026", "report.pdf", b"PDF")
+
+        assert item.name == "report.pdf" and item.path == "Out/2026"
+        assert graph.files["Reports/Q1/Out/2026/report.pdf"]["content"] == "PDF"
+        assert {"Reports/Q1/Out", "Reports/Q1/Out/2026"} <= set(graph.folders)
+
+    @pytest.mark.asyncio
+    async def test_graph_settles_a_taken_name(self) -> None:
+        graph = FakeGraph()
+        connector = _writable(graph)
+        first = await connector.upload("", "a.pdf", b"1")
+
+        with pytest.raises(ConflictError):
+            await connector.upload("", "a.pdf", b"2")
+        replaced = await connector.upload("", "a.pdf", b"2", on_conflict=ConflictBehavior.REPLACE)
+        beside = await connector.upload("", "a.pdf", b"3", on_conflict=ConflictBehavior.RENAME)
+
+        assert replaced.id == first.id
+        assert graph.files["Reports/Q1/a.pdf"]["content"] == "2"
+        assert beside.name == "a 1.pdf"
+
+    @pytest.mark.asyncio
+    async def test_large_content_goes_through_an_upload_session_without_the_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(sharepoint_client, "SIMPLE_UPLOAD_LIMIT", 4)
+        monkeypatch.setattr(sharepoint_client, "CHUNK_SIZE", 3)
+        graph = FakeGraph()
+        connector = _writable(graph)
+
+        await connector.upload("", "big.pdf", b"abcdefgh", on_conflict=ConflictBehavior.REPLACE)
+
+        assert graph.files["Reports/Q1/big.pdf"]["content"] == "abcdefgh"
+        assert len(graph.chunks) == 3
+        assert all("Authorization" not in chunk.headers for chunk in graph.chunks)
+        assert graph.session == ("Reports/Q1/big.pdf", "replace")
+
+    @pytest.mark.asyncio
+    async def test_create_folder_reuses_existing_and_refuses_a_file_in_the_way(self) -> None:
+        graph = FakeGraph()
+        connector = _writable(graph)
+        await connector.upload("", "taken", b"x")
+
+        made = await connector.create_folder("New/Deep")
+        again = await connector.create_folder("New/Deep")
+
+        assert made.id == again.id and made.type == ItemType.FOLDER and made.path == "New"
+        with pytest.raises(ConflictError):
+            await connector.create_folder("taken/sub")
+
+    @pytest.mark.asyncio
+    async def test_a_name_or_folder_that_would_lead_elsewhere_is_refused(self) -> None:
+        connector = _writable(FakeGraph())
+
+        with pytest.raises(ValueError):
+            await connector.upload("", "sub/escape.pdf", b"x")
+        with pytest.raises(NotFoundError):
+            await connector.upload("../HR", "a.pdf", b"x")
+
+    @pytest.mark.asyncio
+    async def test_delete_goes_to_the_bin_unless_permanent(self) -> None:
+        graph = FakeGraph()
+        connector = _writable(graph, excluded_paths=["Out"])
+        kept = await connector.upload("Out", "a.pdf", b"1")
+        gone = await connector.upload("", "b.pdf", b"2")
+
+        await connector.delete(kept.id)  # an excluded folder is still writable
+        await connector.delete(gone.id, permanent=True)
+
+        assert graph.deleted == [(kept.id, "bin"), (gone.id, "permanent")]
+
+    @pytest.mark.asyncio
+    async def test_delete_refuses_the_root_and_what_is_outside(self) -> None:
+        graph = FakeGraph()
+        connector = _writable(graph)
+        graph.files["HR/secret.pdf"] = {
+            "id": "secret",
+            "name": "secret.pdf",
+            "parentReference": {"path": "/drives/drive1/root:/HR"},
+        }
+
+        with pytest.raises(UnsupportedOperationError):
+            await connector.delete("root-item")
+        with pytest.raises(NotFoundError):
+            await connector.delete("secret")
+        assert graph.deleted == []
