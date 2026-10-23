@@ -4,6 +4,7 @@ import builtins
 import json
 import re
 from collections.abc import AsyncIterator
+from datetime import date
 from typing import Any
 
 from pydantic import ValidationError
@@ -29,6 +30,7 @@ from data_sources.core.models import Item, ItemType
 from data_sources.core.paths import relative_path
 from data_sources.core.registry import register_connector
 from data_sources.core.tables import to_csv
+from data_sources.ingest.source import ReportTable
 
 #: Rows asked for per request.
 DEFAULT_PAGE_SIZE = 500
@@ -116,6 +118,9 @@ class MetaAdsConnector(Connector):
     """
 
     provider = "meta_ads"
+
+    #: Attribution can move a day's conversions for up to 28 days after it.
+    revision_days = 28
 
     def __init__(self, config: ConnectorConfig) -> None:
         super().__init__(config)
@@ -258,6 +263,29 @@ class MetaAdsConnector(Connector):
         records = [record async for page in self._pages(spec) for record in page]
         headers, rows = _table(spec, records)
         return InsightsResult(headers=headers, rows=rows)
+
+    def day_column(self, spec: InsightsSpec) -> str | None:
+        """`date_start` when the query is split by single days (`time_increment=1`), else
+        `None` — what `ingest.ReportLoader` keys its incremental loads on."""
+        return "date_start" if spec.time_increment == 1 else None
+
+    async def read_table(
+        self, spec: InsightsSpec, since: date | None, until: date | None
+    ) -> ReportTable:
+        """`spec`'s rows over `since`..`until` (its own period when `None`), as the loader
+        takes them (see `ingest.TabularSource`)."""
+        if since is not None and until is not None:
+            spec = spec.model_copy(
+                update={
+                    "since": since.isoformat(),
+                    "until": until.isoformat(),
+                    "date_preset": None,
+                }
+            )
+        result = await self.run_insights(spec)
+        return ReportTable(
+            headers=result.headers, rows=result.rows, day_column=self.day_column(spec)
+        )
 
     def _to_item(self, name: str, spec: InsightsSpec) -> Item:
         return Item(

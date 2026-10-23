@@ -128,6 +128,7 @@ Routes are generated from the `Connector` interface: `/webhooks` only appears wh
 - [Google Drive connector](docs/google_drive.md) — configuration, auth, sync, folder moves, webhooks
 - [Google Analytics connector](docs/google_analytics.md) — configuration, auth, report definitions, `run_report`
 - [Meta Ads connector](docs/meta_ads.md) — configuration, tokens, insights queries, `run_insights`
+- [Loading reports into a table](docs/ingest.md) — backfill and keep Analytics / Meta Ads data in your own database
 - [SharePoint connector](docs/sharepoint.md) — configuration, sync, item lookup, webhooks
 - [SFTP connector](docs/sftp.md) — configuration, sync, item lookup
 - [Store driver](docs/store.md) — configuring SQLite/PostgreSQL, migrations, adding a driver

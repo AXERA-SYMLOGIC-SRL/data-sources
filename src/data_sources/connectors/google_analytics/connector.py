@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import re
 from collections.abc import AsyncIterator
+from datetime import date
 from typing import Any
 
 from pydantic import ValidationError
@@ -10,6 +11,7 @@ from pydantic import ValidationError
 from data_sources.config.schema import ConnectorConfig
 from data_sources.connectors.google_analytics.client import GoogleAnalyticsClient
 from data_sources.connectors.google_analytics.models import (
+    DateRange,
     PropertySummary,
     ReportResult,
     ReportSpec,
@@ -27,6 +29,7 @@ from data_sources.core.models import Item, ItemType
 from data_sources.core.paths import relative_path
 from data_sources.core.registry import register_connector
 from data_sources.core.tables import to_csv
+from data_sources.ingest.source import ReportTable
 
 #: What a service account asks for when `auth.credentials.scopes` doesn't say otherwise.
 DEFAULT_SCOPES = ("https://www.googleapis.com/auth/analytics.readonly",)
@@ -92,6 +95,9 @@ class GoogleAnalyticsConnector(Connector):
     """
 
     provider = "google_analytics"
+
+    #: Analytics can still revise a day for about two days after reporting it.
+    revision_days = 3
 
     def __init__(self, config: ConnectorConfig) -> None:
         super().__init__(config)
@@ -198,6 +204,24 @@ class GoogleAnalyticsConnector(Connector):
             rows.extend(self._rows(page))
         return ReportResult(
             headers=headers, metric_types=metric_types, rows=rows, row_count=row_count
+        )
+
+    def day_column(self, spec: ReportSpec) -> str | None:
+        """`date` when the report is split by day, else `None` — what `ingest.ReportLoader`
+        keys its incremental loads on."""
+        return "date" if "date" in spec.dimensions else None
+
+    async def read_table(
+        self, spec: ReportSpec, since: date | None, until: date | None
+    ) -> ReportTable:
+        """`spec`'s rows over `since`..`until` (its own date ranges when `None`), as the
+        loader takes them (see `ingest.TabularSource`)."""
+        if since is not None and until is not None:
+            period = DateRange(start_date=since.isoformat(), end_date=until.isoformat())
+            spec = spec.model_copy(update={"date_ranges": [period]})
+        result = await self.run_report(spec)
+        return ReportTable(
+            headers=result.headers, rows=result.rows, day_column=self.day_column(spec)
         )
 
     def _to_item(self, name: str, spec: ReportSpec) -> Item:
