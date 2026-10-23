@@ -44,8 +44,44 @@ class FakeAnalytics:
         self.rows = rows
         self.requests: list[dict[str, Any]] = []
 
+    def account_summaries(self, request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("pageToken") == "p2":
+            return httpx.Response(
+                200,
+                json={
+                    "accountSummaries": [
+                        {
+                            "account": "accounts/2",
+                            "displayName": "Beta",
+                            "propertySummaries": [
+                                {"property": "properties/22", "displayName": "Beta site"}
+                            ],
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "accountSummaries": [
+                    {
+                        "account": "accounts/1",
+                        "displayName": "Alpha",
+                        "propertySummaries": [
+                            {"property": "properties/11", "displayName": "Alpha web"},
+                            {"property": "properties/12", "displayName": "Alpha app"},
+                        ],
+                    },
+                    {"account": "accounts/3", "displayName": "Empty"},
+                ],
+                "nextPageToken": "p2",
+            },
+        )
+
     def handler(self, request: httpx.Request) -> httpx.Response:
         assert request.headers["Authorization"] == "Bearer fake-token"
+        if request.url.path == "/v1beta/accountSummaries":
+            return self.account_summaries(request)
         if request.url.path.endswith("/metadata"):
             return httpx.Response(200, json={"dimensions": [], "metrics": []})
         assert request.url.path == f"/v1beta/{PROPERTY}:runReport"
@@ -106,7 +142,7 @@ def test_parse_property_rejects_non_properties(value: str) -> None:
 @pytest.mark.parametrize(
     "options",
     [
-        {},
+        {"property": "bad"},
         {"property": "1", "reports": ["not", "a", "mapping"]},
         {"property": "1", "reports": {"r": {"metrics": []}}},
         {"property": "1", "reports": {"a/b": {"metrics": ["sessions"]}}},
@@ -317,3 +353,32 @@ async def test_client_retries_throttling(monkeypatch: pytest.MonkeyPatch) -> Non
     always = client_for(lambda r: httpx.Response(429))
     with pytest.raises(RateLimitError):
         await always.run_report(PROPERTY, {})
+
+
+def make_without_property(fake: FakeAnalytics) -> GoogleAnalyticsConnector:
+    connector = GoogleAnalyticsConnector(ConnectorConfig(provider="google_analytics", options={}))
+    connector._client = GoogleAnalyticsClient(
+        FakeCredential(), http=httpx.AsyncClient(transport=httpx.MockTransport(fake.handler))
+    )
+    return connector
+
+
+async def test_list_properties_reads_every_page() -> None:
+    connector = make_without_property(FakeAnalytics([]))
+    found = await connector.list_properties()
+
+    assert [(p.property, p.display_name, p.account_name) for p in found] == [
+        ("properties/11", "Alpha web", "Alpha"),
+        ("properties/12", "Alpha app", "Alpha"),
+        ("properties/22", "Beta site", "Beta"),
+    ]
+    assert found[2].account == "accounts/2"
+
+
+async def test_without_a_property_only_discovery_works() -> None:
+    connector = make_without_property(FakeAnalytics([]))
+
+    assert await connector.validate() is True  # lists accounts instead of reading a property
+    with pytest.raises(ConfigurationError, match="list_properties"):
+        await connector.run_report(ReportSpec(metrics=["sessions"]))
+    assert [i async for i in connector.list()] == []  # no reports configured, nothing to ask

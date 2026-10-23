@@ -73,3 +73,12 @@ class ReportResult(BaseModel):
     metric_types: list[str]
     rows: list[list[str]]
     row_count: int
+
+
+class PropertySummary(BaseModel):
+    """A GA4 property the credential can see, with the account it belongs to."""
+
+    property: str  # `properties/{id}`, what `options.property` takes
+    display_name: str
+    account: str  # `accounts/{id}`
+    account_name: str

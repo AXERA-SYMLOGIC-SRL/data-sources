@@ -10,7 +10,11 @@ from pydantic import ValidationError
 from data_sources.config.schema import ConnectorConfig
 from data_sources.connectors.google_analytics.client import GoogleAnalyticsClient
 from data_sources.connectors.google_analytics.csv_rows import to_csv
-from data_sources.connectors.google_analytics.models import ReportResult, ReportSpec
+from data_sources.connectors.google_analytics.models import (
+    PropertySummary,
+    ReportResult,
+    ReportSpec,
+)
 from data_sources.connectors.google_drive.auth import credential_from_config
 from data_sources.core.connector import Connector
 from data_sources.core.exceptions import (
@@ -75,9 +79,12 @@ class GoogleAnalyticsConnector(Connector):
       `download` runs it and streams the table as CSV, page by page.
 
     Addressed via `config.options["property"]`: the GA4 property id (bare or
-    `properties/{id}`). Auth is `type="oauth"` or `type="service_account"`, as for Google
-    Drive (`google_drive.auth.credential_from_config`), but asking for the
-    `analytics.readonly` scope; a service account must be added as a viewer on the property.
+    `properties/{id}`). It may be left out to connect first and choose after: `list_properties()`
+    lists the properties the credential can see, and until one is configured only
+    `validate()` and `list_properties()` work. Auth is `type="oauth"` or
+    `type="service_account"`, as for Google Drive (`google_drive.auth.credential_from_config`),
+    but asking for the `analytics.readonly` scope; a service account must be added as a viewer
+    on the property.
     `options.page_size` sets rows per request (default 100,000).
 
     The listing is flat: a path other than the root is refused (`NotFoundError`).
@@ -89,9 +96,7 @@ class GoogleAnalyticsConnector(Connector):
     def __init__(self, config: ConnectorConfig) -> None:
         super().__init__(config)
         prop = config.options.get("property")
-        if not prop:
-            raise ConfigurationError("google_analytics connector requires options.property")
-        self._property = parse_property(str(prop))
+        self._configured_property = parse_property(str(prop)) if prop else None
         self._reports = _report_specs(config.options.get("reports"))
         self._page_size = int(config.options.get("page_size", DEFAULT_PAGE_SIZE))
         if not 1 <= self._page_size <= 250_000:
@@ -107,6 +112,15 @@ class GoogleAnalyticsConnector(Connector):
             )
         return self._client
 
+    @property
+    def _property(self) -> str:
+        if self._configured_property is None:
+            raise ConfigurationError(
+                "google_analytics connector has no options.property; pick one from "
+                "list_properties() first"
+            )
+        return self._configured_property
+
     async def connect(self) -> None:
         credential = credential_from_config(
             self.config.auth, provider=self.provider, default_scopes=DEFAULT_SCOPES
@@ -115,11 +129,28 @@ class GoogleAnalyticsConnector(Connector):
 
     async def validate(self) -> bool:
         try:
-            await self.client.get_metadata(self._property)
+            if self._configured_property is None:
+                await self.client.list_account_summaries()
+            else:
+                await self.client.get_metadata(self._configured_property)
         except DataSourceError as exc:
-            self.logger.warning(f"validate() failed for {self._property}: {exc}")
+            self.logger.warning(f"validate() failed for {self._configured_property}: {exc}")
             return False
         return True
+
+    async def list_properties(self) -> builtins.list[PropertySummary]:
+        """Every GA4 property the credential can see (Admin API; the `analytics.readonly`
+        scope covers it, and the project needs the Google Analytics Admin API enabled)."""
+        return [
+            PropertySummary(
+                property=prop["property"],
+                display_name=prop.get("displayName", ""),
+                account=account["account"],
+                account_name=account.get("displayName", ""),
+            )
+            for account in await self.client.list_account_summaries()
+            for prop in account.get("propertySummaries", [])
+        ]
 
     async def _pages(self, spec: ReportSpec) -> AsyncIterator[dict[str, Any]]:
         """The report's response pages, until every row — or `spec.limit` of them — is read."""

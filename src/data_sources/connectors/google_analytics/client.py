@@ -27,6 +27,7 @@ class GoogleAnalyticsClient:
     """
 
     BASE_URL = "https://analyticsdata.googleapis.com/v1beta"
+    ADMIN_URL = "https://analyticsadmin.googleapis.com/v1beta"
 
     def __init__(self, credential: TokenSource, http: httpx.AsyncClient | None = None) -> None:
         self.credential = credential
@@ -52,9 +53,10 @@ class GoogleAnalyticsClient:
     async def _send(
         self,
         method: str,
-        path: str,
+        url: str,
         *,
         json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
         max_retries: int = 6,
     ) -> dict[str, Any]:
         """One call, retried while the API throttles (429, which is also how an exhausted
@@ -62,8 +64,9 @@ class GoogleAnalyticsClient:
         for attempt in range(max_retries):
             response = await self._http.request(
                 method,
-                f"{self.BASE_URL}/{path}",
+                url,
                 json=json,
+                params=params,
                 headers={"Authorization": f"Bearer {await self.credential.get_token()}"},
             )
             if response.status_code == 429 or response.status_code >= 500:
@@ -77,12 +80,25 @@ class GoogleAnalyticsClient:
             body: dict[str, Any] = response.json()
             return body
 
-        raise RateLimitError(f"Analytics API throttled '{path}' after {max_retries} retries")
+        raise RateLimitError(f"Analytics API throttled '{url}' after {max_retries} retries")
 
     async def run_report(self, property_name: str, body: dict[str, Any]) -> dict[str, Any]:
         """`properties/{id}:runReport` — one page of a report."""
-        return await self._send("POST", f"{property_name}:runReport", json=body)
+        return await self._send("POST", f"{self.BASE_URL}/{property_name}:runReport", json=body)
 
     async def get_metadata(self, property_name: str) -> dict[str, Any]:
         """`properties/{id}/metadata` — the dimensions and metrics the property offers."""
-        return await self._send("GET", f"{property_name}/metadata")
+        return await self._send("GET", f"{self.BASE_URL}/{property_name}/metadata")
+
+    async def list_account_summaries(self) -> list[dict[str, Any]]:
+        """Admin API `accountSummaries` — every account the credential can see, each with
+        its property summaries — all pages."""
+        summaries: list[dict[str, Any]] = []
+        params: dict[str, Any] = {"pageSize": 200}
+        while True:
+            page = await self._send("GET", f"{self.ADMIN_URL}/accountSummaries", params=params)
+            summaries.extend(page.get("accountSummaries", []))
+            token = page.get("nextPageToken")
+            if not token:
+                return summaries
+            params = {"pageSize": 200, "pageToken": token}
