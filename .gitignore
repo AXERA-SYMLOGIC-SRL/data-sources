@@ -219,7 +219,3 @@ __marimo__/
 
 # Pycharm
 .idea
-
-# Claude code files
-.claude
-Claude.md

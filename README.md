@@ -95,6 +95,7 @@ Routes are generated from the `Connector` interface: `/webhooks` only appears wh
 | Provider | Status |
 |----------|:------:|
 | Google Drive | ✅ Supported |
+| Google Analytics 4 | ✅ Supported (reports, read-only) |
 | Google Shared Drives | ⚠️ A folder on a shared drive (via the Google Drive connector); a whole shared drive planned |
 | Microsoft OneDrive | ❌ Planned |
 | SharePoint Online | ✅ Supported |
@@ -124,6 +125,7 @@ Routes are generated from the `Connector` interface: `/webhooks` only appears wh
 # Documentation
 
 - [Google Drive connector](docs/google_drive.md) — configuration, auth, sync, folder moves, webhooks
+- [Google Analytics connector](docs/google_analytics.md) — configuration, auth, report definitions, `run_report`
 - [SharePoint connector](docs/sharepoint.md) — configuration, sync, item lookup, webhooks
 - [SFTP connector](docs/sftp.md) — configuration, sync, item lookup
 - [Store driver](docs/store.md) — configuring SQLite/PostgreSQL, migrations, adding a driver

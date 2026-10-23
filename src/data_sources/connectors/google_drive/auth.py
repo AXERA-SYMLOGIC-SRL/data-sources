@@ -124,19 +124,26 @@ class ServiceAccountCredential(DriveCredential):
         )
 
 
-def credential_from_config(auth: AuthConfig | None) -> DriveCredential:
+def credential_from_config(
+    auth: AuthConfig | None,
+    *,
+    provider: str = "google_drive",
+    default_scopes: tuple[str, ...] = DEFAULT_SCOPES,
+) -> DriveCredential:
     """The credential `auth` describes — `type="oauth"` (`client_id`, `client_secret`,
     `refresh_token`) or `type="service_account"` (`service_account_info` as a dict or its
-    JSON text, optional `subject` and `scopes`)."""
+    JSON text, optional `subject` and `scopes`). `provider` names the connector in error
+    messages; `default_scopes` is what a service account asks for when `scopes` is absent.
+    Not Drive-specific despite the class names: any Google API using these two flows."""
     if auth is None:
-        raise ConfigurationError("google_drive connector requires auth")
+        raise ConfigurationError(f"{provider} connector requires auth")
     creds = auth.credentials
 
     if auth.type == "oauth":
         missing = [k for k in ("client_id", "client_secret", "refresh_token") if not creds.get(k)]
         if missing:
             raise ConfigurationError(
-                f"google_drive connector auth.credentials missing: {', '.join(missing)}"
+                f"{provider} connector auth.credentials missing: {', '.join(missing)}"
             )
         return RefreshTokenCredential(
             creds["client_id"], creds["client_secret"], creds["refresh_token"]
@@ -149,15 +156,15 @@ def credential_from_config(auth: AuthConfig | None) -> DriveCredential:
                 info = json.loads(info)
             except ValueError as exc:
                 raise ConfigurationError(
-                    "google_drive auth.credentials.service_account_info is not valid JSON"
+                    f"{provider} auth.credentials.service_account_info is not valid JSON"
                 ) from exc
         if not isinstance(info, dict):
             raise ConfigurationError(
-                "google_drive connector auth.credentials missing: service_account_info"
+                f"{provider} connector auth.credentials missing: service_account_info"
             )
-        scopes = tuple(creds.get("scopes") or DEFAULT_SCOPES)
+        scopes = tuple(creds.get("scopes") or default_scopes)
         return ServiceAccountCredential(info, scopes, creds.get("subject"))
 
     raise ConfigurationError(
-        f"google_drive connector auth.type must be 'oauth' or 'service_account', got {auth.type!r}"
+        f"{provider} connector auth.type must be 'oauth' or 'service_account', got {auth.type!r}"
     )
