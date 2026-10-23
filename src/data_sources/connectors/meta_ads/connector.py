@@ -12,6 +12,7 @@ from data_sources.config.schema import ConnectorConfig
 from data_sources.connectors.meta_ads.client import MetaAdsClient
 from data_sources.connectors.meta_ads.models import (
     AdAccountSummary,
+    BusinessSummary,
     InsightsResult,
     InsightsSpec,
 )
@@ -97,8 +98,9 @@ class MetaAdsConnector(Connector):
       streams the table as CSV, page by page.
 
     Addressed via `options.ad_account` (`act_123` or `123`). It may be left out to connect
-    first and choose after: `list_ad_accounts()` lists the ad accounts the token can see,
-    and until one is set only `validate()` and `list_ad_accounts()` work.
+    first and choose after: `list_ad_accounts()` lists the ad accounts the token can see
+    (`list_businesses()` and `list_ad_accounts(business)` group them by business portfolio),
+    and until one is set only `validate()` and those listings work.
 
     Auth is `type="access_token"` with `credentials.access_token` — a system-user token, or
     a long-lived user token from the consent flow (see `oauth`) — and optionally
@@ -176,18 +178,53 @@ class MetaAdsConnector(Connector):
             return False
         return True
 
-    async def list_ad_accounts(self) -> builtins.list[AdAccountSummary]:
-        """Every ad account the token can see (`ads_read` covers it)."""
+    async def list_businesses(self) -> builtins.list[BusinessSummary]:
+        """The business portfolios the token's user belongs to. Needs the
+        `business_management` permission, or `AuthenticationError` says it's missing."""
+        businesses: builtins.list[BusinessSummary] = []
+        async for page in self.client.get_pages(
+            "me/businesses", {"fields": "id,name", "limit": 100}
+        ):
+            businesses.extend(
+                BusinessSummary(id=raw["id"], name=raw.get("name", "")) for raw in page
+            )
+        return businesses
+
+    async def list_ad_accounts(
+        self, business: str | None = None
+    ) -> builtins.list[AdAccountSummary]:
+        """The ad accounts the token can see (`ads_read` covers it) — or, given a `business`
+        id from `list_businesses()`, those that portfolio owns and those shared in to it as a
+        client (needs `business_management`), each marked with how it holds it."""
+        if business is None:
+            return await self._ad_accounts("me/adaccounts")
+        if not business.isdigit():
+            raise ValueError(f"{business!r} is not a business id")
+        accounts: dict[str, AdAccountSummary] = {}
+        for relationship in ("owned", "client"):
+            for account in await self._ad_accounts(
+                f"{business}/{relationship}_ad_accounts", business, relationship
+            ):
+                accounts.setdefault(account.account, account)
+        return builtins.list(accounts.values())
+
+    async def _ad_accounts(
+        self, edge: str, business: str | None = None, relationship: str | None = None
+    ) -> builtins.list[AdAccountSummary]:
         accounts: builtins.list[AdAccountSummary] = []
         params = {"fields": "id,name,currency,account_status,timezone_name", "limit": 100}
-        async for page in self.client.get_pages("me/adaccounts", params):
+        async for page in self.client.get_pages(edge, params):
             accounts.extend(
-                AdAccountSummary(
-                    account=raw["id"],
-                    name=raw.get("name", ""),
-                    currency=raw.get("currency", ""),
-                    status=int(raw.get("account_status", 0)),
-                    timezone=raw.get("timezone_name", ""),
+                AdAccountSummary.model_validate(
+                    {
+                        "account": raw["id"],
+                        "name": raw.get("name", ""),
+                        "currency": raw.get("currency", ""),
+                        "status": int(raw.get("account_status", 0)),
+                        "timezone": raw.get("timezone_name", ""),
+                        "business_id": business,
+                        "relationship": relationship,
+                    }
                 )
                 for raw in page
             )

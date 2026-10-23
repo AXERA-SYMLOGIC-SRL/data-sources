@@ -64,6 +64,17 @@ class FakeMeta:
         params = request.url.params
         if path == "me/adaccounts":
             return self.ad_accounts(params.get("after"))
+        if path == "me/businesses":
+            return httpx.Response(200, json={"data": [{"id": "77", "name": "Acme"}]})
+        if path in ("77/owned_ad_accounts", "77/client_ad_accounts"):
+            kind = path.split("/")[1]
+            if kind == "owned_ad_accounts":
+                data = [{"id": "act_1", "name": "Alpha", "account_status": 1}]
+            else:  # act_1 is also listed as a client: it must only appear once
+                data = [{"id": "act_1", "name": "Alpha"}, {"id": "act_9", "name": "Shared"}]
+            return httpx.Response(200, json={"data": data})
+        if path == "99/owned_ad_accounts":
+            return graph_error(200, "Requires business_management permission", 403)
         if path == "act_123":
             return httpx.Response(200, json={"id": "act_123"})
         if path == "act_123/insights":
@@ -405,3 +416,31 @@ async def test_token_exchange() -> None:
     assert (short.token, short.expires_in) == ("short", None)
     assert (long.token, long.expires_in) == ("long", 5183944)
     assert seen[1]["fb_exchange_token"] == "short" and seen[1]["grant_type"] == "fb_exchange_token"
+
+
+async def test_list_businesses() -> None:
+    found = await make(FakeMeta([]), account=None).list_businesses()
+    assert [(b.id, b.name) for b in found] == [("77", "Acme")]
+
+
+async def test_list_ad_accounts_of_a_business() -> None:
+    found = await make(FakeMeta([]), account=None).list_ad_accounts("77")
+
+    assert [(a.account, a.business_id, a.relationship) for a in found] == [
+        ("act_1", "77", "owned"),  # the owned entry wins over the client duplicate
+        ("act_9", "77", "client"),
+    ]
+
+
+async def test_flat_listing_has_no_business() -> None:
+    found = await make(FakeMeta([]), account=None).list_ad_accounts()
+    assert all(a.business_id is None and a.relationship is None for a in found)
+
+
+async def test_business_listing_needs_the_permission_and_a_real_id() -> None:
+    connector = make(FakeMeta([]), account=None)
+    with pytest.raises(AuthenticationError, match="business_management"):
+        await connector.list_ad_accounts("99")
+    for bad in ("77/../me", "abc", ""):
+        with pytest.raises(ValueError):
+            await connector.list_ad_accounts(bad)

@@ -76,11 +76,22 @@ class InsightsResult(BaseModel):
     rows: list[list[str]]
 
 
+class BusinessSummary(BaseModel):
+    """A business portfolio (Meta Business) the token's user belongs to."""
+
+    id: str
+    name: str
+
+
 class AdAccountSummary(BaseModel):
-    """An ad account the token can see."""
+    """An ad account the token can see. Listed through a business portfolio it also says
+    which one and how the portfolio holds it: `owned` (its own) or `client` (shared in by
+    another business)."""
 
     account: str  # `act_{id}`, what `options.ad_account` takes
     name: str
     currency: str
     status: int  # Meta's `account_status` code; 1 is active
     timezone: str
+    business_id: str | None = None
+    relationship: Literal["owned", "client"] | None = None

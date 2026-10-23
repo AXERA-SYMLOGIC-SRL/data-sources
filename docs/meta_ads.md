@@ -22,7 +22,7 @@ report tables rather than files, so there are two ways in:
 - For a "Connect with Facebook" flow, the **Facebook Login** product, with your redirect URI
   (the dev service uses `http://localhost:8000/meta/oauth/callback`) listed under its
   valid OAuth redirect URIs.
-- The permission **`ads_read`**. While the app is in Development mode it works for ad accounts
+- The permission **`ads_read`**, plus **`business_management`** to list business portfolios. While the app is in Development mode it works for ad accounts
   of people who have a role on the app. To read other people's ad accounts the app needs
   **Advanced Access** to `ads_read`, which requires App Review and Business Verification.
   Check Meta's current docs for what your case needs.
@@ -80,7 +80,20 @@ config = ConnectorConfig(
 `list_ad_accounts()` returns every ad account the token can see (`AdAccountSummary`: `account`,
 `name`, `currency`, `status`, `timezone`), so a connect flow can offer a picker. `status` is
 Meta's `account_status` code; `1` is active. Without `options.ad_account`, only `validate()`
-and `list_ad_accounts()` work.
+and the listings below work.
+
+To group them by business portfolio:
+
+```python
+for business in await connector.list_businesses():          # BusinessSummary: id, name
+    for account in await connector.list_ad_accounts(business.id):
+        print(business.name, account.account, account.relationship)  # "owned" or "client"
+```
+
+`owned` accounts belong to the portfolio; `client` ones are shared in by another business.
+An account listed under both appears once, as `owned`. Both calls need the
+**`business_management`** permission in addition to `ads_read` (ask for both in `authorize_url(..., scopes=("ads_read", "business_management"))`); without it they raise
+`AuthenticationError` naming it.
 
 ## The consent flow
 
