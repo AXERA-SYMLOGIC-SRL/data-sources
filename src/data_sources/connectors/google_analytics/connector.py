@@ -9,7 +9,6 @@ from pydantic import ValidationError
 
 from data_sources.config.schema import ConnectorConfig
 from data_sources.connectors.google_analytics.client import GoogleAnalyticsClient
-from data_sources.connectors.google_analytics.csv_rows import to_csv
 from data_sources.connectors.google_analytics.models import (
     PropertySummary,
     ReportResult,
@@ -27,6 +26,7 @@ from data_sources.core.logging import logger
 from data_sources.core.models import Item, ItemType
 from data_sources.core.paths import relative_path
 from data_sources.core.registry import register_connector
+from data_sources.core.tables import to_csv
 
 #: What a service account asks for when `auth.credentials.scopes` doesn't say otherwise.
 DEFAULT_SCOPES = ("https://www.googleapis.com/auth/analytics.readonly",)

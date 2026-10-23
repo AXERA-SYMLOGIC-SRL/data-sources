@@ -1,4 +1,4 @@
-"""Rendering report rows as CSV."""
+"""Rendering report rows (analytics and ads connectors) as CSV."""
 
 from __future__ import annotations
 
