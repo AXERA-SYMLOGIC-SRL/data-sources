@@ -80,6 +80,40 @@ auth = AuthConfig(
 )
 ```
 
+### Where to get them
+
+Console menus move around; the names below are what Google calls things.
+
+**`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`**
+
+1. In the [Cloud Console](https://console.cloud.google.com/), select the project and enable the
+   two APIs from [Requirements](#requirements).
+2. **APIs & Services → OAuth consent screen**: set it up once (app name, support email) and add
+   your Google accounts as test users.
+3. **APIs & Services → Credentials → Create credentials → OAuth client ID**, type **Web
+   application**. Under **Authorised redirect URIs** add your `OAUTH_REDIRECT_URI`.
+4. Copy the **Client ID** and **Client secret** shown. The secret is also on the client's page
+   later.
+
+**`OAUTH_REDIRECT_URI`** is not issued: you pick it. It is the URL of your callback route, for
+the dev service `http://localhost:8000/oauth/callback`, and it must be listed on the OAuth client
+exactly as sent (scheme, host, port and path), or Google answers `redirect_uri_mismatch`.
+
+**`GOOGLE_SERVICE_ACCOUNT_JSON`** (instead of OAuth)
+
+1. **IAM & Admin → Service accounts → Create service account**; no roles are needed.
+2. Open it → **Keys → Add key → Create new key → JSON**. The file downloads once; put its
+   contents in the variable (or a secret store). An organisation policy can block key creation.
+3. In Google Analytics, **Admin → Property access management**, add the service account's email
+   as a **Viewer**.
+
+**The property id** (`options.property`) is in Google Analytics under **Admin → Property
+settings → Property ID**, a number. Or skip it and use
+[`list_properties()`](#finding-the-property).
+
+**The refresh token** comes from your consent flow, not from a console: it is in the token
+response when the user consents with `access_type=offline`.
+
 ### The dev service
 
 `dev/` (local only, not in git) also needs:

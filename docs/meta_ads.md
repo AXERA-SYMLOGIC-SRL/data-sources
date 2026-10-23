@@ -69,6 +69,42 @@ auth = AuthConfig(
 )
 ```
 
+### Where to get them
+
+Meta renames menus often; if a label differs, the steps in
+[Meta's docs](https://developers.facebook.com/docs/marketing-api/overview/authorization) apply.
+
+**`META_APP_ID` and `META_APP_SECRET`**
+
+1. In [Meta for Developers](https://developers.facebook.com/apps/), **Create App**, type
+   **Business**, then add the **Marketing API** and **Facebook Login** products
+   (see [Requirements](#requirements)).
+2. **App settings → Basic**: the **App ID** is at the top, and the **App Secret** is behind
+   **Show** (Meta asks for your Facebook password).
+
+**`META_REDIRECT_URI`** is not issued: you pick it. It is the URL of your callback route, for
+the dev service `http://localhost:8000/meta/oauth/callback`. Add it under **Facebook Login →
+Settings → Valid OAuth Redirect URIs**; it must match what you send exactly or the consent
+fails.
+
+**`META_ACCESS_TOKEN`** (a system-user token, instead of a user's consent)
+
+1. In [Business Settings](https://business.facebook.com/settings), **Users → System users →
+   Add**. An admin of the business has to do this, and the app must belong to (or be connected
+   to) that business.
+2. Select the system user → **Add assets**: give it the ad account(s) with at least
+   view-performance access.
+3. **Generate new token**: pick the app, choose the expiry (Meta recommends tokens that
+   expire; a never-expiring one is a standing credential), tick **`ads_read`** (plus
+   `business_management` if you list portfolios), and copy the token. It is shown once.
+
+**The ad account id** (`options.ad_account`) is in Ads Manager's account dropdown, a number you
+can write with or without `act_`. Or skip it and use
+[`list_ad_accounts()`](#finding-the-ad-account).
+
+**A user's long-lived token** comes from the [consent flow](#the-consent-flow), not from a
+console.
+
 ### The dev service
 
 `dev/` (local only, not in git) also needs:
