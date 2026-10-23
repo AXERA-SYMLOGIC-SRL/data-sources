@@ -39,6 +39,49 @@ Plan for that, or use a system-user token.
 
 **On this side:** no extra Python dependencies, and no store (the connector keeps no state).
 
+## Environment variables
+
+The connector itself reads **no** environment variables: everything comes in through
+`ConnectorConfig`, and the YAML loader doesn't expand `${VAR}`. Reading the environment is
+your application's job. These are the names the [dev service](#the-dev-service) uses, a good
+convention to follow:
+
+| Variable | Goes into | Needed for |
+|---|---|---|
+| `META_APP_ID` | `oauth.authorize_url`, `exchange_code`, `extend_token` | The consent flow |
+| `META_APP_SECRET` | `auth.credentials.app_secret`, and `exchange_code` / `extend_token` | The consent flow; recommended on every call (adds `appsecret_proof`) |
+| `META_REDIRECT_URI` | `oauth.authorize_url` and `exchange_code` | The consent flow: must match a valid OAuth redirect URI of the app exactly |
+| `META_ACCESS_TOKEN` | `auth.credentials.access_token` | Only with a system-user token, which is one value for the whole app |
+
+A user's long-lived token from the consent flow is per user and expires in about 60 days, so it
+belongs in your database with its expiry, not in an environment variable. Treat the app secret
+and every token as secrets.
+
+```python
+import os
+
+auth = AuthConfig(
+    type="access_token",
+    credentials={
+        "access_token": os.environ["META_ACCESS_TOKEN"],  # system-user token
+        "app_secret": os.environ["META_APP_SECRET"],
+    },
+)
+```
+
+### The dev service
+
+`dev/` (local only, not in git) also needs:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DATABASE_URL` | none, required | SQLAlchemy async URL, e.g. `postgresql+asyncpg://dev:dev@localhost:5433/data_sources` |
+| `META_APP_ID`, `META_APP_SECRET` | none, required for Meta | As above |
+| `META_REDIRECT_URI` | `http://localhost:8000/meta/oauth/callback` | As above |
+
+They go in `dev/.env` (copy `dev/.env.example`), which the service loads on start. The Meta
+variables are only needed once you use the Meta section of the page.
+
 ## Configuring it
 
 ```python

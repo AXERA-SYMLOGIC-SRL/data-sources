@@ -49,6 +49,49 @@ the GA4 property. Properties it can't see don't appear in `list_properties()`.
 **On this side:** no extra Python dependencies beyond the base install (it reuses
 `google-auth` and `httpx`), and no store: the connector keeps no state.
 
+## Environment variables
+
+The connector itself reads **no** environment variables: everything comes in through
+`ConnectorConfig`, and the YAML loader doesn't expand `${VAR}`. Reading the environment is
+your application's job. These are the names the [dev service](#the-dev-service) uses, a good
+convention to follow:
+
+| Variable | Goes into | Needed for |
+|---|---|---|
+| `GOOGLE_CLIENT_ID` | `auth.credentials.client_id` | OAuth: the Web application client's id |
+| `GOOGLE_CLIENT_SECRET` | `auth.credentials.client_secret` | OAuth: the client's secret |
+| `OAUTH_REDIRECT_URI` | not the connector: your consent flow | OAuth: must match an authorised redirect URI exactly |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | `auth.credentials.service_account_info` (the JSON text is accepted) | Service account |
+
+The OAuth **refresh token** is per user and per connection, so it belongs in your database or
+secret store, not in an environment variable. Treat the client secret, the refresh token and
+the service account key as secrets.
+
+```python
+import os
+
+auth = AuthConfig(
+    type="oauth",
+    credentials={
+        "client_id": os.environ["GOOGLE_CLIENT_ID"],
+        "client_secret": os.environ["GOOGLE_CLIENT_SECRET"],
+        "refresh_token": stored_refresh_token,  # from your database
+    },
+)
+```
+
+### The dev service
+
+`dev/` (local only, not in git) also needs:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DATABASE_URL` | none, required | SQLAlchemy async URL, e.g. `postgresql+asyncpg://dev:dev@localhost:5433/data_sources` |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | none, required | As above |
+| `OAUTH_REDIRECT_URI` | none, required | `http://localhost:8000/oauth/callback` |
+
+They go in `dev/.env` (copy `dev/.env.example`), which the service loads on start.
+
 ## Configuring it
 
 ```python
