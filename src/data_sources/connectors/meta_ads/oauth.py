@@ -47,8 +47,10 @@ def authorize_url(
 async def _get_token(
     http: httpx.AsyncClient, api_version: str, params: dict[str, str]
 ) -> AccessToken:
-    response = await http.get(
-        f"https://graph.facebook.com/{api_version}/oauth/access_token", params=params
+    # POSTed, though Meta's docs show GET: the app secret, the code and the tokens would
+    # otherwise sit in the URL, which httpx writes to the log at INFO level.
+    response = await http.post(
+        f"https://graph.facebook.com/{api_version}/oauth/access_token", data=params
     )
     body: dict[str, Any] = response.json() if response.content else {}
     if response.status_code >= 400 or "access_token" not in body:

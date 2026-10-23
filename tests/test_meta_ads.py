@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 from typing import Any
+from urllib.parse import parse_qsl
 
 import httpx
 import pytest
@@ -399,11 +400,14 @@ async def test_token_exchange() -> None:
     seen: list[dict[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(dict(request.url.params))
+        assert request.method == "POST"
+        assert not request.url.query  # nothing secret in the URL, which httpx logs
+        form = dict(parse_qsl(request.content.decode()))
+        seen.append(form)
         assert request.url.path == "/v26.0/oauth/access_token"
-        if request.url.params.get("code") == "bad":
+        if form.get("code") == "bad":
             return graph_error(100, "code expired")
-        if "fb_exchange_token" in request.url.params:
+        if "fb_exchange_token" in form:
             return httpx.Response(200, json={"access_token": "long", "expires_in": 5183944})
         return httpx.Response(200, json={"access_token": "short"})
 
