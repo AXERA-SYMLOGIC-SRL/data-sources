@@ -270,7 +270,11 @@ CATALOG: tuple[Entity, ...] = (
             number("amount_untaxed"),
             number("amount_tax"),
             number("amount_total"),
-            number("amount_due", "What is still owed."),
+            number(
+                "amount_due",
+                "What is still owed, in `currency`; on a credit note, what is still to "
+                "be refunded (also positive).",
+            ),
             number(
                 "amount_total_company", "Total in the company currency, signed: refunds negative."
             ),
@@ -349,7 +353,9 @@ CATALOG: tuple[Entity, ...] = (
             text("number"),
             text("type", "incoming, outgoing or internal (also mrp_operation, dropship)."),
             ref("partner_id", "partners"),
-            text("origin", "Source document (order number)."),
+            text("origin", "Source document (order number), free text."),
+            ref("sale_order_id", "sale_orders", "The sales order a delivery ships."),
+            ref("purchase_order_id", "purchase_orders", "The purchase order a receipt brings in."),
             datetime("scheduled_date"),
             datetime("done_date"),
             text("state", "draft, waiting, confirmed, assigned (ready), done or cancel."),
@@ -422,7 +428,8 @@ CATALOG: tuple[Entity, ...] = (
             ref("partner_id", "partners"),
             text("stage"),
             text("status", "open, won or lost."),
-            number("expected_revenue"),
+            number("expected_revenue", "Expected revenue, in `currency`."),
+            text("currency"),
             number("probability", "Percent."),
             ref("salesperson_id", "users"),
             text("team"),
@@ -534,6 +541,68 @@ CATALOG: tuple[Entity, ...] = (
     ),
 )
 
+#: What a column means when its entity doesn't say more: the conventions every adapter follows.
+COMMON: dict[str, str] = {
+    "name": "Name as shown in the ERP.",
+    "number": "Document number as shown in the ERP (e.g. S00042, INV/2026/0001).",
+    "state": "The ERP's own status value.",
+    "description": "The line's text as printed on the document.",
+    "currency": "ISO code of the currency the amounts are in.",
+    "amount_untaxed": "Amount without tax, in `currency`. Never negative: credit notes and refunds "
+    "are positive too (tell them apart by `kind`).",
+    "amount_tax": "Tax, in `currency`. Never negative, also on credit notes.",
+    "amount_total": "Total with tax, in `currency`. Never negative: credit notes and refunds are "
+    "positive too.",
+    "quantity": "Quantity, in the product's unit of measure.",
+    "unit_price": "Price per unit before discount, in `currency`.",
+    "margin": "Untaxed revenue minus cost, in `currency` (overstated where the product has no "
+    "cost).",
+    "date": "The document's date (UTC).",
+    "created_at": "When the record was created in the ERP (UTC).",
+    "active": "False when the record is archived in the ERP (archived records are kept).",
+    "partner_id": "The customer or vendor (`partners`).",
+    "product_id": "The product (`products`).",
+    "order_id": "The order the line belongs to.",
+    "origin": "Reference of the document it came from, free text (often an order number).",
+    "email": "Email address.",
+    "phone": "Phone number.",
+    "city": "City.",
+    "country": "Country name.",
+    "uom": "Unit of measure.",
+    "journal": "The accounting journal (sales, purchases, a bank, ...).",
+    "salesperson_id": "The salesperson (`users`).",
+    "deadline": "Due or expected date.",
+}
+
+
+def _default_description(column: Column) -> str:
+    """A readable description from the column's name and type, when neither the entity nor `COMMON`
+    has one."""
+    if column.name in COMMON:
+        return COMMON[column.name]
+    words = column.name.removesuffix("_id").replace("_", " ")
+    if column.type == "ref":
+        return f"The {words} (`{column.references}`)."
+    if column.type == "datetime":
+        return f"{words.capitalize()} (UTC)."
+    if column.type == "date":
+        return f"{words.capitalize()} (a date)."
+    if column.type == "boolean":
+        return f"Whether: {words}."
+    if column.name.startswith("quantity_"):
+        return f"Quantity {words.removeprefix('quantity ')}, in the product's unit of measure."
+    return f"{words.capitalize()}."
+
+
+def _described(entity: Entity) -> Entity:
+    columns = tuple(
+        c if c.description else Column(c.name, c.type, _default_description(c), c.references)
+        for c in entity.columns
+    )
+    return Entity(entity.name, entity.description, columns)
+
+
+CATALOG = tuple(_described(e) for e in CATALOG)
 ENTITIES: dict[str, Entity] = {e.name: e for e in CATALOG}
 
 
