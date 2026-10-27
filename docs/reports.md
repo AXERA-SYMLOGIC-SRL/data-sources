@@ -64,10 +64,10 @@ Every source implements `authorize_url(state)`, `exchange_code(code) -> Grant`,
 | `provider` | `Grant.credentials` (`identity`, `expires_in`) | `Account.id` | `spec` |
 |---|---|---|---|
 | `google_analytics` | `refresh_token` (email) | `properties/{id}` (`group`: GA account) | `dimensions`, `metrics`, `day_column`? (`date`) |
-| `google_search_console` | `refresh_token` (email) | site URL | `dimensions` (first is `date`) |
+| `google_search_console` | `refresh_token` (email) | site URL | `dimensions` (first is `date`), `search_type`? (`web`; also `image`, `video`, `news`, `discover`, `googleNews`) |
 | `google_ads` | `refresh_token` (email) | `customer`, or `customer:manager` for a customer reached through a manager (`group`) | `resource`, `fields` |
 | `meta_ads` | `access_token` (the user's name, ~60 days) | `act_{id}` | `fields`, `level`, `breakdowns`?, `time_increment`?, `day_column`? |
-| `tiktok_ads` | `access_token`, `advertiser_ids` | advertiser id (one of those) | `data_level`, `dimensions`, `metrics` |
+| `tiktok_ads` | `access_token`, `advertiser_ids` | advertiser id (one of those) | `data_level`, `dimensions`, `metrics`, `report_type`? (`BASIC`; `AUDIENCE` for audience dimensions such as `gender`, `age`, `country_code`) |
 
 A source keeps its provider's own calls too, for what doesn't fit the interface: GA's
 `list_fields` (a property's dimensions and metrics, custom ones included), Meta's
