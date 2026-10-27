@@ -30,7 +30,16 @@ from data_sources.reports import (
 )
 from data_sources.reports.oauth import GOOGLE_TOKEN_URL
 
-PROVIDERS = ["google_ads", "google_analytics", "google_search_console", "meta_ads", "tiktok_ads"]
+PROVIDERS = [
+    "facebook_pages",
+    "google_ads",
+    "google_analytics",
+    "google_search_console",
+    "instagram",
+    "meta_ads",
+    "tiktok_ads",
+    "tiktok_organic",
+]
 
 PLUGIN = """
 from data_sources.reports.base import Account, Grant, ReportSource

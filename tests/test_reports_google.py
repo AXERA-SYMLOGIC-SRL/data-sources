@@ -530,6 +530,48 @@ async def test_search_console_reads_one_day_at_a_time(sleep: Sleeper) -> None:
     }
 
 
+async def test_search_console_reads_the_search_type_it_is_asked_for(sleep: Sleeper) -> None:
+    seen: list[dict[str, Any]] = []
+    day = date(2026, 10, 20)
+    report = await search_console(with_token(sc_days({day: 1}, seen)), sleep).read(
+        {"refresh_token": REFRESH},
+        SITE,
+        {"dimensions": ["date", "page"], "search_type": "image"},
+        day,
+        day,
+    )
+    assert seen[0]["type"] == "image" and report.envelope["searchType"] == "image"
+
+
+async def test_discover_and_news_rows_have_no_position(sleep: Sleeper) -> None:
+    day = date(2026, 10, 20)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        row = {k: v for k, v in sc_row(day, "https://example.com/a").items() if k != "position"}
+        return httpx.Response(200, json={"rows": [row]})
+
+    source = search_console(with_token(handler), sleep)
+    report = await source.read_report(
+        REFRESH, SITE, ["date", "page"], day, day, search_type="discover"
+    )
+    assert report.days == [day] and "position" not in report.records[0]
+    with pytest.raises(ReportError):  # a web row without a position is still invalid
+        await source.read_report(REFRESH, SITE, ["date", "page"], day, day)
+
+
+def refuse(request: httpx.Request) -> httpx.Response:
+    raise AssertionError("no request expected")
+
+
+async def test_an_unknown_search_type_never_reaches_google(sleep: Sleeper) -> None:
+    day = date(2026, 10, 20)
+    with pytest.raises(ReportError) as caught:
+        await search_console(refuse, sleep).read_report(
+            REFRESH, SITE, ["date", "page"], day, day, search_type="maps"
+        )
+    assert caught.value.reason == "request_failed"
+
+
 async def test_search_console_aggregates_by_page_when_asked_for_pages(sleep: Sleeper) -> None:
     seen: list[dict[str, Any]] = []
     day = date(2026, 10, 20)
@@ -1032,6 +1074,35 @@ async def test_ads_other_400_is_request_failed(sleep: Sleeper) -> None:
     with pytest.raises(ReportError) as caught:
         await read_ads(handler, sleep)
     assert caught.value.reason == "request_failed" and "GAQL" not in str(caught.value)
+    assert caught.value.diagnostics == "bad GAQL"
+
+
+async def test_ads_refused_query_says_which_field_in_the_diagnostics_only(sleep: Sleeper) -> None:
+    body = {
+        "error": {
+            "code": 400,
+            "status": "INVALID_ARGUMENT",
+            "message": "Request contains an invalid argument.",
+            "details": [
+                {
+                    "requestId": "req-9",
+                    "errors": [
+                        {
+                            "errorCode": {"queryError": "UNRECOGNIZED_FIELD"},
+                            "message": f"Bad field 'metrics.video_views' {DEVELOPER_TOKEN}",
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    with pytest.raises(ReportError) as caught:
+        await read_ads(lambda _: httpx.Response(400, json=body), sleep)
+    error = caught.value
+    assert "video_views" not in str(error) and "video_views" not in error.message
+    assert error.diagnostics == (
+        "UNRECOGNIZED_FIELD: Bad field 'metrics.video_views' [redacted] (request req-9)"
+    )
 
 
 async def test_ads_refused_refresh_token_is_auth_failed_and_logged_redacted(

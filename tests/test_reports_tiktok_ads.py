@@ -325,6 +325,7 @@ async def read(
     *,
     dimensions: list[str] | None = None,
     data_level: str = "AUCTION_CAMPAIGN",
+    report_type: str = "BASIC",
     sleep: Sleeps | None = None,
 ) -> Any:
     return await reports(handler, sleep).read_report(
@@ -336,6 +337,7 @@ async def read(
         metrics=["spend", "impressions"],
         since=since,
         until=until,
+        report_type=report_type,
     )
 
 
@@ -373,6 +375,48 @@ async def test_read_report_windows_pages_and_keeps_raw_rows() -> None:
     assert report.records == rows
     assert report.days == [date(2026, 9, 1)] * 2 + [date(2026, 10, 1)] * 2
     assert report.envelope == {"advertiser_id": ACCOUNT}
+
+
+async def test_an_audience_report_asks_for_its_type_and_every_dimension() -> None:
+    dimensions = ["campaign_id", "gender", "age", "stat_time_day"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        assert params["report_type"] == "AUDIENCE" and params["service_type"] == "AUCTION"
+        assert json.loads(params["dimensions"]) == dimensions
+        # The entity is the first dimension that isn't the day, whatever else is asked.
+        assert json.loads(params["filtering"])[0]["field_name"] == "campaign_status"
+        item = {
+            "dimensions": {
+                "campaign_id": "1",
+                "gender": "MALE",
+                "age": "AGE_25_34",
+                "stat_time_day": "2026-10-01",
+            },
+            "metrics": {"spend": "1"},
+        }
+        return success({"list": [item], "page_info": {"total_page": 1}})
+
+    report = await read(handler, dimensions=dimensions, report_type="AUDIENCE")
+    assert report.days == [date(2026, 10, 1)]
+    assert report.records[0]["dimensions"]["age"] == "AGE_25_34"
+
+
+async def test_an_item_missing_an_asked_for_dimension_fails_the_report() -> None:
+    item = {"dimensions": {"campaign_id": "1", "stat_time_day": "2026-10-01"}, "metrics": {}}
+    with pytest.raises(ReportError) as caught:
+        await read(
+            lambda _: success({"list": [item], "page_info": {"total_page": 1}}),
+            dimensions=["campaign_id", "gender", "stat_time_day"],
+            report_type="AUDIENCE",
+        )
+    assert caught.value.reason == "unavailable"
+
+
+async def test_an_unknown_report_type_never_reaches_tiktok() -> None:
+    with pytest.raises(ReportError) as caught:
+        await read(no_request, report_type="FANCY")
+    assert caught.value.reason == "request_failed"
 
 
 @pytest.mark.parametrize(

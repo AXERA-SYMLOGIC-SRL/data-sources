@@ -31,6 +31,7 @@ AUTH_CODES = {40001, 40102, 40104, 40105, 40106, *range(40118, 40126)}
 RETRY_CODES = {40100, 40016, 40133}
 REPORT_WINDOW_DAYS = 30
 PAGE_SIZE = 1000
+REPORT_TYPES = ("BASIC", "AUDIENCE")
 
 UNREACHABLE = Problem("unavailable", "TikTok API could not be reached.")
 BUSY = Problem("unavailable", "TikTok is temporarily unavailable or rate limited; retry later.")
@@ -113,7 +114,7 @@ class TikTokAdsReports(ReportSource):
     """TikTok Ads (`provider: tiktok_ads`): `app_id`, `app_secret` and `redirect_uri` in
     `auth.credentials`. The grant's credentials are `{"access_token", "advertiser_ids"}`; an
     account is an advertiser id (one of those); a report spec is `{"data_level", "dimensions",
-    "metrics"}`."""
+    "metrics", "report_type"?}` (`BASIC` unless it says `AUDIENCE`)."""
 
     provider = "tiktok_ads"
     app_credentials = ("app_id", "app_secret")
@@ -265,6 +266,7 @@ class TikTokAdsReports(ReportSource):
             metrics=list(spec["metrics"]),
             since=since,
             until=until,
+            report_type=spec.get("report_type", "BASIC"),
         )
 
     async def read_report(
@@ -278,10 +280,15 @@ class TikTokAdsReports(ReportSource):
         metrics: list[str],
         since: date,
         until: date,
+        report_type: str = "BASIC",
     ) -> RawReport:
-        """A daily BASIC auction report over `since..until` (inclusive), every entity status
-        included, as TikTok returned its items. `dimensions` is the entity id and
-        `stat_time_day`."""
+        """A daily auction report over `since..until` (inclusive), every entity status included,
+        as TikTok returned its items. `report_type` is `BASIC` (the entity and its metrics) or
+        `AUDIENCE` (the same split by audience dimensions such as `gender`, `age`,
+        `country_code`). `dimensions` is the entity id (first, once `stat_time_day` is left out),
+        then any audience dimensions, and `stat_time_day`; every one must come back on each item."""
+        if report_type not in REPORT_TYPES:
+            raise _fail("Unsupported TikTok report type.", "request_failed")
         account = str(advertiser_id)
         if account not in advertiser_ids(authorized):
             raise _fail("This advertiser was not authorized for the saved token.", "auth_failed")
@@ -298,7 +305,7 @@ class TikTokAdsReports(ReportSource):
                         "report/integrated/get/",
                         params={
                             "advertiser_id": account,
-                            "report_type": "BASIC",
+                            "report_type": report_type,
                             "service_type": "AUCTION",
                             "data_level": data_level,
                             "dimensions": json.dumps(dimensions),
@@ -337,6 +344,7 @@ class TikTokAdsReports(ReportSource):
                             or not isinstance(found_metrics, dict)
                             or not isinstance(found_dimensions, dict)
                             or not found_dimensions.get(entity_id)
+                            or any(d not in found_dimensions for d in dimensions)
                         ):
                             raise _fail("TikTok returned an invalid daily report row.")
                         records.append(item)

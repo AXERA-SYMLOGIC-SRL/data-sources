@@ -26,6 +26,9 @@ API_URL = "https://www.googleapis.com/webmasters/v3"
 PAGE_SIZE = 25_000
 DAILY_LIMIT = 50_000
 METRICS = ("clicks", "impressions", "ctr", "position")
+SEARCH_TYPES = ("web", "image", "video", "news", "discover", "googleNews")
+#: Discover and Google News rows carry no average position.
+NO_POSITION = ("discover", "googleNews")
 READ_PERMISSIONS = {"siteOwner", "siteFullUser", "siteRestrictedUser"}
 RATE_LIMIT_REASONS = {
     "rateLimitExceeded",
@@ -86,7 +89,8 @@ class SearchConsoleSite:
 
 class SearchConsoleReports(GoogleReportSource):
     """Search Console (`provider: google_search_console`). An account is a site URL; a report
-    spec is `{"dimensions"}`, the first of which must be `date`."""
+    spec is `{"dimensions", "search_type"?}`, the first dimension of which must be `date`, and the
+    search type `web` unless it says otherwise (`SEARCH_TYPES`)."""
 
     provider = "google_search_console"
     scope = SCOPE
@@ -120,7 +124,12 @@ class SearchConsoleReports(GoogleReportSource):
         until: date,
     ) -> RawReport:
         return await self.read_report(
-            refresh_token_of(credentials), account, list(spec["dimensions"]), since, until
+            refresh_token_of(credentials),
+            account,
+            list(spec["dimensions"]),
+            since,
+            until,
+            search_type=spec.get("search_type", "web"),
         )
 
     async def list_sites(self, refresh_token: str) -> list[SearchConsoleSite]:
@@ -144,13 +153,26 @@ class SearchConsoleReports(GoogleReportSource):
         ]
 
     async def read_report(
-        self, refresh_token: str, site_url: str, dimensions: list[str], since: date, until: date
+        self,
+        refresh_token: str,
+        site_url: str,
+        dimensions: list[str],
+        since: date,
+        until: date,
+        search_type: str = "web",
     ) -> RawReport:
-        """Search Analytics (web, all data states) by `dimensions`, whose first must be `date`,
-        one day at a time: a long range otherwise loses rows to the API's top-row cap. A day
-        that reaches `DAILY_LIMIT` rows is listed in the envelope's `limitedDays`."""
-        if since > until or not site_url or not dimensions or dimensions[0] != "date":
+        """Search Analytics (all data states) of one `search_type` by `dimensions`, whose first
+        must be `date`, one day at a time: a long range otherwise loses rows to the API's top-row
+        cap. A day that reaches `DAILY_LIMIT` rows is listed in the envelope's `limitedDays`."""
+        if (
+            since > until
+            or not site_url
+            or not dimensions
+            or dimensions[0] != "date"
+            or search_type not in SEARCH_TYPES
+        ):
             raise _fail("Invalid Search Console report definition.", "request_failed")
+        metrics = METRICS if search_type not in NO_POSITION else METRICS[:-1]
         url = f"{API_URL}/sites/{quote(site_url, safe='')}/searchAnalytics/query"
         records: list[dict[str, Any]] = []
         days: list[date | None] = []
@@ -158,7 +180,7 @@ class SearchConsoleReports(GoogleReportSource):
         envelope: dict[str, Any] = {
             "siteUrl": site_url,
             "dimensions": dimensions,
-            "searchType": "web",
+            "searchType": search_type,
             "dataState": "all",
             "limitedDays": limited,
         }
@@ -176,7 +198,7 @@ class SearchConsoleReports(GoogleReportSource):
                             "startDate": day.isoformat(),
                             "endDate": day.isoformat(),
                             "dimensions": dimensions,
-                            "type": "web",
+                            "type": search_type,
                             "dataState": "all",
                             "aggregationType": "byPage" if "page" in dimensions else "byProperty",
                             "rowLimit": PAGE_SIZE,
@@ -195,7 +217,7 @@ class SearchConsoleReports(GoogleReportSource):
                             or parse_day(keys[0]) != day
                             or any(
                                 type(row.get(m)) not in (int, float) or not math.isfinite(row[m])
-                                for m in METRICS
+                                for m in metrics
                             )
                         ):
                             raise _fail("Search Console returned an invalid daily row.")
