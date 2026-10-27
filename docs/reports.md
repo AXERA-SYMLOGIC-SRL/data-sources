@@ -19,6 +19,9 @@ registry first loads. An application builds a source from a `ConnectorConfig`:
 | `google_ads` | `GoogleAdsReports` (`google_ads`) | Google Ads REST (`googleAds:search`) | same + `developer_token` (for reads) | `api_version` (`v26`) |
 | `meta_ads` | `MetaAdsReports` (`meta_ads`) | Graph API | `app_id`, `app_secret`, `redirect_uri` | `api_version` (`v26.0`) |
 | `tiktok_ads` | `TikTokAdsReports` (`tiktok_ads`) | Marketing API v1.3 | `app_id`, `app_secret`, `redirect_uri` | |
+| `tiktok_organic` | `TikTokOrganicReports` (`tiktok_organic`) | TikTok Display API v2 | `client_key`, `client_secret`, `redirect_uri` | |
+| `facebook_pages` | `FacebookPagesReports` (`meta_organic`) | Graph API (Pages) | same as `meta_ads` (the same app) | `api_version` |
+| `instagram` | `InstagramReports` (`meta_organic`) | Graph API (Instagram) | same as `meta_ads` (the same app) | `api_version` |
 
 The credentials are the **application's** (its OAuth client); what a user's consent buys comes
 back as a `Grant` and is passed to every later call.
@@ -68,6 +71,9 @@ Every source implements `authorize_url(state)`, `exchange_code(code) -> Grant`,
 | `google_ads` | `refresh_token` (email) | `customer`, or `customer:manager` for a customer reached through a manager (`group`) | `resource`, `fields` |
 | `meta_ads` | `access_token` (the user's name, ~60 days) | `act_{id}` | `fields`, `level`, `breakdowns`?, `time_increment`?, `day_column`? |
 | `tiktok_ads` | `access_token`, `advertiser_ids` | advertiser id (one of those) | `data_level`, `dimensions`, `metrics`, `report_type`? (`BASIC`; `AUDIENCE` for audience dimensions such as `gender`, `age`, `country_code`) |
+| `tiktok_organic` | `access_token`, `refresh_token`, `open_id`, `scope` (`expires_in`: the refresh token's) | the user's `open_id` | `report` (`account` or `videos`): a snapshot of now, every record labelled with today. Tokens last a day: `refresh_grant` renews them |
+| `facebook_pages` | `access_token` (the user's name, ~60 days) | a Page id | `report`: `daily` (a record per day, `{"metrics": {...}}`), `page` and `posts` (snapshots) |
+| `instagram` | `access_token` (the user's name, ~60 days) | the Instagram account id (`group`: its Page) | `report`: `daily` (a record per day), `account`, `media` and `audience` (snapshots) |
 
 A source keeps its provider's own calls too, for what doesn't fit the interface: GA's
 `list_fields` (a property's dimensions and metrics, custom ones included), Meta's
