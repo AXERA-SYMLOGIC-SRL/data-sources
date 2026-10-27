@@ -1074,6 +1074,35 @@ async def test_ads_other_400_is_request_failed(sleep: Sleeper) -> None:
     with pytest.raises(ReportError) as caught:
         await read_ads(handler, sleep)
     assert caught.value.reason == "request_failed" and "GAQL" not in str(caught.value)
+    assert caught.value.diagnostics == "bad GAQL"
+
+
+async def test_ads_refused_query_says_which_field_in_the_diagnostics_only(sleep: Sleeper) -> None:
+    body = {
+        "error": {
+            "code": 400,
+            "status": "INVALID_ARGUMENT",
+            "message": "Request contains an invalid argument.",
+            "details": [
+                {
+                    "requestId": "req-9",
+                    "errors": [
+                        {
+                            "errorCode": {"queryError": "UNRECOGNIZED_FIELD"},
+                            "message": f"Bad field 'metrics.video_views' {DEVELOPER_TOKEN}",
+                        }
+                    ],
+                }
+            ],
+        }
+    }
+    with pytest.raises(ReportError) as caught:
+        await read_ads(lambda _: httpx.Response(400, json=body), sleep)
+    error = caught.value
+    assert "video_views" not in str(error) and "video_views" not in error.message
+    assert error.diagnostics == (
+        "UNRECOGNIZED_FIELD: Bad field 'metrics.video_views' [redacted] (request req-9)"
+    )
 
 
 async def test_ads_refused_refresh_token_is_auth_failed_and_logged_redacted(

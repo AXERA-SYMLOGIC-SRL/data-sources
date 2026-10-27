@@ -13,13 +13,16 @@ class ReportError(DataSourceError):
     or lacks a permission), `request_failed` (the provider refused the request itself),
     `oauth_not_configured`, `no_refresh_token`, `access_denied` (a consent without the scope
     asked for), `customer_not_enabled` (Google Ads). The message never holds a credential or
-    the provider's raw response.
+    the provider's raw response. `diagnostics` (when the provider says anything structured) is
+    what it said, as its own error codes and messages with credentials removed: for logs and
+    run timelines, not for end users.
     """
 
-    def __init__(self, reason: str, message: str = "") -> None:
+    def __init__(self, reason: str, message: str = "", diagnostics: str = "") -> None:
         super().__init__(message or reason)
         self.reason = reason
         self.message = message
+        self.diagnostics = diagnostics
 
     @property
     def auth(self) -> bool:
@@ -37,7 +40,8 @@ class Problem:
 
     reason: str
     message: str = ""
+    diagnostics: str = ""
 
     def error(self) -> ReportError:
         cls = ReportAuthError if self.reason == "auth_failed" else ReportError
-        return cls(self.reason, self.message)
+        return cls(self.reason, self.message, self.diagnostics)

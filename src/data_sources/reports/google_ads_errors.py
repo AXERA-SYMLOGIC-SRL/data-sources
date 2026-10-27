@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 from urllib.parse import parse_qs, quote, quote_plus
 
@@ -32,10 +32,9 @@ def google_ads_error_codes(response: httpx.Response) -> set[str]:
     return codes
 
 
-def log_google_ads_error(response: httpx.Response, secrets: Iterable[str] = ()) -> None:
-    """Log what Google said about a refused request: status, endpoint, request id and Google's
-    error codes and messages, with every credential of the request (and `secrets`, the app's
-    client secret and developer token) removed. Bodies, headers and queries are never logged."""
+def _cleaner(response: httpx.Response, secrets: Iterable[str] = ()) -> Callable[..., str]:
+    """A function that shortens a provider's text to one bounded line with every credential of the
+    request (and `secrets`) removed."""
     request = response.request
     secrets = set(secrets)
     bearer = request.headers.get("authorization", "")
@@ -58,6 +57,57 @@ def log_google_ads_error(response: httpx.Response, secrets: Iterable[str] = ()) 
             text = text.replace(secret, "[redacted]")
         # Keep a provider message on one log line and bound its size.
         return " ".join(text.split())[:limit]
+
+    return clean
+
+
+def google_ads_error_summary(response: httpx.Response, secrets: Iterable[str] = ()) -> str:
+    """What Google said about a refused request: its error codes and messages (at most three) and
+    the request id to quote to Google, credentials removed. Empty when the body has no structured
+    errors."""
+    clean = _cleaner(response, secrets)
+    try:
+        body = response.json()
+    except ValueError:
+        return ""
+    error = body.get("error") if isinstance(body, dict) else None
+    found: list[str] = []
+    request_id = response.headers.get("request-id") or response.headers.get("x-request-id")
+    details = error.get("details") if isinstance(error, dict) else None
+    for item in details if isinstance(details, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("requestId"), str):
+            request_id = item["requestId"]
+        entries = item.get("errors")
+        for entry in entries[:3] if isinstance(entries, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            codes = entry.get("errorCode")
+            code = (
+                ", ".join(str(v) for v in codes.values() if isinstance(v, (str, int)))
+                if isinstance(codes, dict)
+                else ""
+            )
+            message = entry.get("message") if isinstance(entry.get("message"), str) else ""
+            if code or message:
+                found.append(
+                    clean(f"{code}: {message}" if code and message else code or message, 300)
+                )
+    if not found and isinstance(error, dict) and isinstance(error.get("message"), str):
+        found.append(clean(error["message"], 300))
+    if not found:
+        return ""
+    summary = "; ".join(found[:3])
+    return f"{summary} (request {clean(request_id, 100)})" if request_id else summary
+
+
+def log_google_ads_error(response: httpx.Response, secrets: Iterable[str] = ()) -> None:
+    """Log what Google said about a refused request: status, endpoint, request id and Google's
+    error codes and messages, with every credential of the request (and `secrets`, the app's
+    client secret and developer token) removed. Bodies, headers and queries are never logged."""
+    request = response.request
+    clean = _cleaner(response, secrets)
 
     details: dict[str, Any] = {
         "http_status": response.status_code,

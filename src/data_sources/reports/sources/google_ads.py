@@ -16,7 +16,11 @@ from data_sources.core.logging import logger
 from data_sources.reports.base import Account
 from data_sources.reports.errors import Problem, ReportError
 from data_sources.reports.google import GoogleReportSource, refresh_token_of
-from data_sources.reports.google_ads_errors import google_ads_error_codes, log_google_ads_error
+from data_sources.reports.google_ads_errors import (
+    google_ads_error_codes,
+    google_ads_error_summary,
+    log_google_ads_error,
+)
 from data_sources.reports.http import ApiClient, Classify, Retry, Verdict
 from data_sources.reports.models import RawReport, parse_day
 from data_sources.reports.oauth import is_google_token_request
@@ -48,7 +52,10 @@ def _fail(message: str, reason: str = "unavailable") -> ReportError:
     return Problem(reason, message).error()
 
 
-def make_classify(log: Callable[[httpx.Response], None]) -> Classify:
+def make_classify(
+    log: Callable[[httpx.Response], None],
+    summarize: Callable[[httpx.Response], str] = lambda _: "",
+) -> Classify:
     def classify(response: httpx.Response) -> Verdict:
         if response.is_error:
             log(response)
@@ -64,7 +71,9 @@ def make_classify(log: Callable[[httpx.Response], None]) -> Classify:
             # Provider diagnostics were logged with redaction; errors stay stable.
             if is_google_token_request(response):
                 return Problem("auth_failed", REFUSED_MESSAGE)
-            return Problem("request_failed", REFUSED_MESSAGE)
+            # Google's own error codes and messages (no credentials) travel apart from the stable
+            # message, so an application can show them where an admin looks.
+            return Problem("request_failed", REFUSED_MESSAGE, summarize(response))
         return None
 
     return classify
@@ -104,12 +113,17 @@ class GoogleAdsReports(GoogleReportSource):
             response, (self.credential("client_secret"), self.credential("developer_token"))
         )
 
+    def summarize_error(self, response: httpx.Response) -> str:
+        return google_ads_error_summary(
+            response, (self.credential("client_secret"), self.credential("developer_token"))
+        )
+
     def log_token_error(self, response: httpx.Response) -> None:
         self.log_error(response)
 
     def _client(self) -> ApiClient:
         return ApiClient(
-            make_classify(self.log_error),
+            make_classify(self.log_error, self.summarize_error),
             unreachable=UNREACHABLE,
             invalid=INVALID,
             timeout=60,
