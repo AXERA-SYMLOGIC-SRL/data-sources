@@ -2,12 +2,15 @@
 
 Long-term Marketing API tokens, not TikTok organic-account tokens. The token exchange returns
 every advertiser the user authorized; keep that list with the token, it bounds what may be read.
-Credentials stay out of URLs and error messages.
+Some grants come back without it: `authorized_advertiser_ids` then asks TikTok for the token's
+advertisers. Credentials stay out of error messages, and out of URLs except the app secret that
+endpoint requires in its query string, which is redacted from httpx's request log.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -40,6 +43,25 @@ REFUSED = Problem(
 )
 
 _logger = logger.getChild("tiktok_ads.client")
+
+
+class _RedactTikTokSecret(logging.Filter):
+    """httpx logs request URLs; advertiser discovery needs the app secret as a query parameter."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(
+                value.copy_set_param("secret", "[redacted]")
+                if isinstance(value, httpx.URL)
+                and value.host == "business-api.tiktok.com"
+                and "secret" in value.params
+                else value
+                for value in record.args
+            )
+        return True
+
+
+logging.getLogger("httpx").addFilter(_RedactTikTokSecret())
 
 
 def _fail(message: str, reason: str = "unavailable") -> ReportError:
@@ -145,8 +167,12 @@ class TikTokAdsReports(ReportSource):
         token = data.get("access_token")
         if not isinstance(token, str) or not token:
             raise _fail("TikTok did not return an advertiser access token.", "auth_failed")
+        # Some grants omit the ids: `authorized_advertiser_ids` finds them later.
         return Grant(
-            {"access_token": token, "advertiser_ids": advertiser_ids(data.get("advertiser_ids"))}
+            {
+                "access_token": token,
+                "advertiser_ids": advertiser_ids(data.get("advertiser_ids", [])),
+            }
         )
 
     @staticmethod
@@ -158,8 +184,7 @@ class TikTokAdsReports(ReportSource):
     async def list_advertisers(self, access_token: str, authorized: Any) -> list[Advertiser]:
         """The authorized advertisers, with their names, currencies and timezones.
 
-        Uses the id list from the token exchange instead of `oauth2/advertiser/get`, which takes
-        the app secret in its query string (where HTTP and proxy logs would keep it)."""
+        Only for ids verified by the token exchange or `authorized_advertiser_ids`."""
         ids = advertiser_ids(authorized)
         found: dict[str, Advertiser] = {}
         async with self._client(self._token(access_token)) as api:
@@ -189,12 +214,37 @@ class TikTokAdsReports(ReportSource):
                     )
         return [found[account] for account in ids if account in found]
 
+    async def authorized_advertiser_ids(self, access_token: str) -> list[str]:
+        """The advertisers the token may read, asked of TikTok (`oauth2/advertiser/get/`), for a
+        grant whose exchange returned none. Keep them with the token: `read` checks them."""
+        if not self.configured:
+            raise _fail("Configure the TikTok app before discovering advertisers.", "auth_failed")
+        async with self._client(self._token(access_token)) as api:
+            data = await self._data(
+                api,
+                "GET",
+                "oauth2/advertiser/get/",
+                params={
+                    "app_id": self.credential("app_id"),
+                    "secret": self.credential("app_secret"),
+                },
+            )
+        items = data.get("list")
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise _fail("TikTok returned an invalid authorized advertiser list.")
+        return advertiser_ids([item.get("advertiser_id") for item in items])
+
     async def list_accounts(self, credentials: Mapping[str, Any]) -> list[Account]:
+        """The grant's advertisers (asked of TikTok when the grant has none: store the completed
+        grant with `authorized_advertiser_ids` to read them)."""
+        authorized = credentials.get("advertiser_ids")
+        if not authorized:
+            authorized = await self.authorized_advertiser_ids(credentials.get("access_token"))  # type: ignore[arg-type]
         return [
             Account(id=a.account, name=a.name, currency=a.currency, timezone=a.timezone)
             for a in await self.list_advertisers(
                 credentials.get("access_token"),  # type: ignore[arg-type]
-                credentials.get("advertiser_ids"),
+                authorized,
             )
         ]
 

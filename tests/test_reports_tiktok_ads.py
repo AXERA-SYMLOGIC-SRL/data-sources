@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from datetime import date
 from typing import Any
@@ -151,7 +152,6 @@ async def test_exchange_is_not_retried() -> None:
     [
         {"advertiser_ids": [ACCOUNT]},
         {"access_token": "", "advertiser_ids": [ACCOUNT]},
-        {"access_token": TOKEN},
         {"access_token": TOKEN, "advertiser_ids": "123"},
         {"access_token": TOKEN, "advertiser_ids": ["12a"]},
         {"access_token": TOKEN, "advertiser_ids": [True]},
@@ -163,6 +163,57 @@ async def test_exchange_without_a_token_or_a_valid_advertiser_list_is_auth_faile
     with pytest.raises(ReportAuthError) as caught:
         await reports(lambda _: success(data)).exchange_code("code")
     assert caught.value.reason == "auth_failed"
+
+
+async def test_exchange_without_ids_leaves_them_to_discovery() -> None:
+    grant = await reports(lambda _: success({"access_token": TOKEN})).exchange_code("code")
+    assert grant.credentials == {"access_token": TOKEN, "advertiser_ids": []}
+
+
+# --- authorized advertiser discovery ------------------------------------------------------------
+
+
+async def test_discovery_asks_for_the_tokens_advertisers_and_redacts_the_secret_from_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="httpx")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET" and request.url.path.endswith("/oauth2/advertiser/get/")
+        assert request.url.params["app_id"] == APP_ID
+        assert request.url.params["secret"] == APP_SECRET
+        assert request.headers["Access-Token"] == TOKEN
+        return success({"list": [{"advertiser_id": ACCOUNT}, {"advertiser_id": int(ACCOUNT)}]})
+
+    assert await reports(handler).authorized_advertiser_ids(TOKEN) == [ACCOUNT]
+    assert "oauth2/advertiser/get/" in caplog.text and "redacted" in caplog.text
+    assert APP_SECRET not in caplog.text and TOKEN not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "items", [None, {}, [None], [{"advertiser_id": True}], [{"advertiser_id": "wrong"}]]
+)
+async def test_malformed_discovery_is_an_error_not_an_empty_list(items: Any) -> None:
+    with pytest.raises(ReportError):
+        await reports(lambda _: success({"list": items})).authorized_advertiser_ids(TOKEN)
+
+
+@pytest.mark.parametrize(("code", "reason"), [(40105, "auth_failed"), (40002, "request_failed")])
+async def test_discovery_errors_keep_their_reason(code: int, reason: str) -> None:
+    with pytest.raises(ReportError) as caught:
+        await reports(lambda _: failure(code)).authorized_advertiser_ids(TOKEN)
+    assert caught.value.reason == reason and TOKEN not in str(caught.value)
+
+
+async def test_list_accounts_discovers_the_advertisers_of_a_grant_without_ids() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/oauth2/advertiser/get/"):
+            return success({"list": [{"advertiser_id": ACCOUNT}]})
+        assert json.loads(request.url.params["advertiser_ids"]) == [ACCOUNT]
+        return success({"list": [{"advertiser_id": ACCOUNT, "name": "Store"}]})
+
+    accounts = await reports(handler).list_accounts({"access_token": TOKEN, "advertiser_ids": []})
+    assert [a.id for a in accounts] == [ACCOUNT]
 
 
 async def test_exchange_with_no_data_is_unavailable() -> None:
