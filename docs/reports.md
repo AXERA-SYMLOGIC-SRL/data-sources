@@ -16,6 +16,7 @@ registry first loads. An application builds a source from a `ConnectorConfig`:
 |---|---|---|---|---|
 | `google_analytics` | `GoogleAnalyticsReports` (`google_analytics`) | GA4 Data + Admin API | `client_id`, `client_secret`, `redirect_uri` | |
 | `google_search_console` | `SearchConsoleReports` (`search_console`) | Search Console API | same | |
+| `google_merchant` | `GoogleMerchantReports` (`google_merchant`) | Merchant API (`accounts/v1`, `reports/v1`) | same | |
 | `google_ads` | `GoogleAdsReports` (`google_ads`) | Google Ads REST (`googleAds:search`) | same + `developer_token` (for reads) | `api_version` (`v26`) |
 | `meta_ads` | `MetaAdsReports` (`meta_ads`) | Graph API | `app_id`, `app_secret`, `redirect_uri` | `api_version` (`v26.0`) |
 | `tiktok_ads` | `TikTokAdsReports` (`tiktok_ads`) | Marketing API v1.3 | `app_id`, `app_secret`, `redirect_uri` | |
@@ -68,6 +69,7 @@ Every source implements `authorize_url(state)`, `exchange_code(code) -> Grant`,
 |---|---|---|---|
 | `google_analytics` | `refresh_token` (email) | `properties/{id}` (`group`: GA account) | `dimensions`, `metrics`, `day_column`? (`date`) |
 | `google_search_console` | `refresh_token` (email) | site URL | `dimensions` (first is `date`), `search_type`? (`web`; also `image`, `video`, `news`, `discover`, `googleNews`) |
+| `google_merchant` | `refresh_token` (email) | merchant id (digits) | `view` (`product_performance_view`), `fields` (snake_case query-language fields, with `date`); the Google Cloud project must be registered with the merchant account |
 | `google_ads` | `refresh_token` (email) | `customer`, or `customer:manager` for a customer reached through a manager (`group`) | `resource`, `fields` |
 | `meta_ads` | `access_token` (the user's name, ~60 days) | `act_{id}` | `fields`, `level`, `breakdowns`?, `time_increment`?, `day_column`? |
 | `tiktok_ads` | `access_token`, `advertiser_ids` | advertiser id (one of those) | `data_level`, `dimensions`, `metrics`, `report_type`? (`BASIC`; `AUDIENCE` for audience dimensions such as `gender`, `age`, `country_code`) |
