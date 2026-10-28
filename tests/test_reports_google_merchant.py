@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
@@ -123,14 +123,16 @@ async def test_reads_windows_and_pages(sleep: Sleeper) -> None:
     assert report.envelope == {
         "accountId": ACCOUNT,
         "view": "product_performance_view",
+        "mode": "daily",
         "fields": FIELDS,
+        "filters": {},
     }
 
 
 @pytest.mark.parametrize(
     "view, fields, account",
     [
-        ("product_view", FIELDS, ACCOUNT),
+        ("bogus_view", FIELDS, ACCOUNT),
         ("product_performance_view", ["offer_id", "clicks"], ACCOUNT),
         ("product_performance_view", [*FIELDS[:-1], "clicks; DROP"], ACCOUNT),
         ("product_performance_view", FIELDS, "accounts/1"),
@@ -220,5 +222,123 @@ async def test_other_refusals_are_request_failures(sleep: Sleeper) -> None:
             FIELDS,
             date(2026, 10, 1),
             date(2026, 10, 1),
+        )
+    assert error.value.reason == "request_failed"
+
+
+def snapshot_row(offer: str, **extra: Any) -> dict[str, Any]:
+    return {"productView": {"id": f"online~en~US~{offer}", "offerId": offer, **extra}}
+
+
+async def test_a_snapshot_is_read_as_it_is_now_and_labelled_with_today(sleep: Sleeper) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(body_of(request))
+        return httpx.Response(200, json={"results": [snapshot_row("a"), snapshot_row("b")]})
+
+    report = await merchant(with_token(handler), sleep).read(
+        {"refresh_token": REFRESH},
+        ACCOUNT,
+        {"view": "product_view", "fields": ["id", "offer_id"], "mode": "snapshot"},
+        date(2026, 10, 1),
+        date(2026, 10, 2),
+    )
+    assert [b["query"] for b in seen] == ["SELECT id, offer_id FROM product_view"]
+    assert report.days == [datetime.now(UTC).date()] * 2 and len(report.records) == 2
+
+
+async def test_a_trailing_window_ends_on_the_last_day(sleep: Sleeper) -> None:
+    seen: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(body_of(request))
+        return httpx.Response(200, json={})
+
+    await merchant(with_token(handler), sleep).read(
+        {"refresh_token": REFRESH},
+        ACCOUNT,
+        {
+            "view": "competitive_visibility_top_merchant_view",
+            "fields": ["domain", "rank"],
+            "mode": "snapshot",
+            "trailing_days": 7,
+        },
+        date(2026, 10, 1),
+        date(2026, 10, 20),
+    )
+    assert seen[0]["query"] == (
+        "SELECT domain, rank FROM competitive_visibility_top_merchant_view "
+        "WHERE date BETWEEN '2026-10-14' AND '2026-10-20'"
+    )
+
+
+async def test_filters_make_one_query_per_combination(sleep: Sleeper) -> None:
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(body_of(request)["query"])
+        return httpx.Response(200, json={})
+
+    report = await merchant(with_token(handler), sleep).read_report(
+        REFRESH,
+        ACCOUNT,
+        "best_sellers_product_cluster_view",
+        ["report_date", "rank"],
+        date(2026, 10, 1),
+        date(2026, 10, 1),
+        mode="snapshot",
+        filters={"report_granularity": ["WEEKLY"], "report_country_code": ["'RO'", "'DE'"]},
+    )
+    assert seen == [
+        "SELECT report_date, rank FROM best_sellers_product_cluster_view "
+        "WHERE report_granularity = WEEKLY AND report_country_code = 'RO'",
+        "SELECT report_date, rank FROM best_sellers_product_cluster_view "
+        "WHERE report_granularity = WEEKLY AND report_country_code = 'DE'",
+    ]
+    assert report.envelope["filters"] == {
+        "report_granularity": ["WEEKLY"],
+        "report_country_code": ["'RO'", "'DE'"],
+    }
+
+
+async def test_a_filter_without_values_reads_nothing(sleep: Sleeper) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request, not even for a token")
+
+    report = await merchant(handler, sleep).read_report(
+        REFRESH,
+        ACCOUNT,
+        "best_sellers_brand_view",
+        ["rank"],
+        date(2026, 10, 1),
+        date(2026, 10, 1),
+        mode="snapshot",
+        filters={"report_country_code": []},
+    )
+    assert report.records == [] and report.days == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"mode": "snapshot", "fields": ["date", "clicks"]},
+        {"mode": "daily", "fields": ["clicks"]},
+        {"mode": "weekly", "fields": ["clicks"]},
+        {"mode": "daily", "fields": ["date", "clicks"], "trailing_days": 3},
+        {"mode": "snapshot", "fields": ["rank"], "filters": {"c": ["'RO' OR 1=1"]}},
+        {"mode": "snapshot", "fields": ["rank"], "filters": {"country; DROP": ["'RO'"]}},
+    ],
+)
+async def test_refuses_an_inconsistent_mode_or_filter(
+    sleep: Sleeper, kwargs: dict[str, Any]
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request for an invalid definition")
+
+    fields = kwargs.pop("fields")
+    with pytest.raises(ReportError) as error:
+        await merchant(handler, sleep).read_report(
+            REFRESH, ACCOUNT, "product_view", fields, date(2026, 10, 1), date(2026, 10, 1), **kwargs
         )
     assert error.value.reason == "request_failed"

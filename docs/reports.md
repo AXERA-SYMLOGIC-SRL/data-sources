@@ -69,7 +69,7 @@ Every source implements `authorize_url(state)`, `exchange_code(code) -> Grant`,
 |---|---|---|---|
 | `google_analytics` | `refresh_token` (email) | `properties/{id}` (`group`: GA account) | `dimensions`, `metrics`, `day_column`? (`date`) |
 | `google_search_console` | `refresh_token` (email) | site URL | `dimensions` (first is `date`), `search_type`? (`web`; also `image`, `video`, `news`, `discover`, `googleNews`) |
-| `google_merchant` | `refresh_token` (email) | merchant id (digits) | `view` (`product_performance_view`), `fields` (snake_case query-language fields, with `date`); the Google Cloud project must be registered with the merchant account |
+| `google_merchant` | `refresh_token` (email) | merchant id (digits) | `view` (one of the Merchant API's report tables), `fields` (snake_case query-language fields), `mode`? (`daily`, with `date` among the fields, or `snapshot`: as it is now, rows labelled today), `filters`? (`{field: [literal, ...]}`, a query per combination; `'RO'`, `166` or `WEEKLY`; no values reads nothing), `trailing_days`? (snapshot over the days ending `until`); the Google Cloud project must be registered with the merchant account |
 | `google_ads` | `refresh_token` (email) | `customer`, or `customer:manager` for a customer reached through a manager (`group`) | `resource`, `fields` |
 | `meta_ads` | `access_token` (the user's name, ~60 days) | `act_{id}` | `fields`, `level`, `breakdowns`?, `time_increment`?, `day_column`? |
 | `tiktok_ads` | `access_token`, `advertiser_ids` | advertiser id (one of those) | `data_level`, `dimensions`, `metrics`, `report_type`? (`BASIC`; `AUDIENCE` for audience dimensions such as `gender`, `age`, `country_code`) |

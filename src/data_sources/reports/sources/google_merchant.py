@@ -7,10 +7,11 @@ authorization failure."""
 
 from __future__ import annotations
 
+import itertools
 import math
 import re
 from collections.abc import Mapping
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -31,9 +32,25 @@ ACCOUNT_PAGE_SIZE = 500
 REPORT_PAGE_SIZE = 10_000
 #: Days per query: a long range would make one very long paged read.
 WINDOW_DAYS = 31
-#: The reports with a `date` segment: the table name in the query, and the key the API wraps a row
-#: in.
-VIEWS = {"product_performance_view": "productPerformanceView"}
+#: The reports: the table name in the query, and the key the API wraps a row in.
+VIEWS = {
+    "product_performance_view": "productPerformanceView",
+    "non_product_performance_view": "nonProductPerformanceView",
+    "product_view": "productView",
+    "price_competitiveness_product_view": "priceCompetitivenessProductView",
+    "price_insights_product_view": "priceInsightsProductView",
+    "best_sellers_product_cluster_view": "bestSellersProductClusterView",
+    "best_sellers_brand_view": "bestSellersBrandView",
+    "competitive_visibility_competitor_view": "competitiveVisibilityCompetitorView",
+    "competitive_visibility_top_merchant_view": "competitiveVisibilityTopMerchantView",
+    "competitive_visibility_benchmark_view": "competitiveVisibilityBenchmarkView",
+}
+#: `daily`: rows carry their own `date`, read for `since..until`. `snapshot`: the report as it is
+#: now (no date, or a trailing window), every row labelled with today.
+MODES = ("daily", "snapshot")
+#: A value in a `filters` condition as the query writes it: a quoted string (`'RO'`), a number
+#: (`166`) or an enum (`WEEKLY`).
+LITERAL = re.compile(r"^('[A-Za-z0-9_-]{1,40}'|[0-9]{1,20}|[A-Z][A-Z_]{0,39})$")
 FIELD = re.compile(r"^[a-z][a-z0-9_]*$")
 ACCOUNT_ID = re.compile(r"^[0-9]+$")
 RATE_LIMIT_STATUSES = {"RESOURCE_EXHAUSTED"}
@@ -174,6 +191,9 @@ class GoogleMerchantReports(GoogleReportSource):
             list(spec["fields"]),
             since,
             until,
+            mode=str(spec.get("mode", "daily")),
+            filters=spec.get("filters"),
+            trailing_days=spec.get("trailing_days"),
         )
 
     async def read_report(
@@ -184,32 +204,67 @@ class GoogleMerchantReports(GoogleReportSource):
         fields: list[str],
         since: date,
         until: date,
+        *,
+        mode: str = "daily",
+        filters: Mapping[str, list[str]] | None = None,
+        trailing_days: int | None = None,
     ) -> RawReport:
-        """`view` over `since..until` with `fields` (snake_case, as the query language takes them),
-        in windows of `WINDOW_DAYS`, every page of each. A row whose date falls outside the window,
-        or whose counts are not numbers, fails the read. The envelope names the account, view and
-        fields."""
+        """`view` with `fields` (snake_case, as the query language takes them), every page of each
+        query. In `daily` mode (`date` among the fields) it covers `since..until` in windows of
+        `WINDOW_DAYS`, and a row whose date falls outside fails the read. In `snapshot` mode it is
+        read as it is now (over the `trailing_days` ending `until`, when given) and every row is
+        labelled with today. `filters` is `{field: [literal, ...]}`: one query per combination, so
+        a report that needs a country or category is read for each; a filter with no values reads
+        nothing. A row's counts that are not numbers fail the read. The envelope names the account,
+        view, mode, fields and filters."""
+        filters = {k: list(v) for k, v in (filters or {}).items()}
         if (
             since > until
             or not ACCOUNT_ID.match(account)
             or view not in VIEWS
-            or "date" not in fields
+            or mode not in MODES
+            or (mode == "daily") != ("date" in fields)
+            or (trailing_days is not None and (mode != "snapshot" or trailing_days < 1))
             or len(set(fields)) != len(fields)
             or not all(isinstance(f, str) and FIELD.match(f) for f in fields)
+            or not all(
+                FIELD.match(f) and all(LITERAL.match(str(v)) for v in vs)
+                for f, vs in filters.items()
+            )
         ):
             raise _fail("Invalid Merchant Center report definition.", "request_failed")
         key = VIEWS[view]
         url = REPORTS_URL.format(account=account)
+        envelope: dict[str, Any] = {
+            "accountId": account,
+            "view": view,
+            "mode": mode,
+            "fields": fields,
+            "filters": filters,
+        }
+        if trailing_days is not None:
+            envelope["trailingDays"] = trailing_days
         records: list[dict[str, Any]] = []
         days: list[date | None] = []
-        envelope: dict[str, Any] = {"accountId": account, "view": view, "fields": fields}
+        if any(not values for values in filters.values()):
+            return RawReport(records, days, envelope)
+        if mode == "daily":
+            ranges: list[tuple[date, date] | None] = list(windows(since, until, WINDOW_DAYS))
+        else:
+            ranges = [(until - timedelta(days=trailing_days - 1), until) if trailing_days else None]
+        today = datetime.now(UTC).date()
+        combinations = list(itertools.product(*([(f, v) for v in vs] for f, vs in filters.items())))
         async with self._client() as api:
             headers = await self.headers(api, refresh_token)
-            for start, end in windows(since, until, WINDOW_DAYS):
-                query = (
-                    f"SELECT {', '.join(fields)} FROM {view} "
-                    f"WHERE date BETWEEN '{start.isoformat()}' AND '{end.isoformat()}'"
-                )
+            for window, combination in itertools.product(ranges, combinations):
+                conditions = [f"{f} = {v}" for f, v in combination]
+                if window:
+                    conditions.insert(
+                        0, f"date BETWEEN '{window[0].isoformat()}' AND '{window[1].isoformat()}'"
+                    )
+                query = f"SELECT {', '.join(fields)} FROM {view}"
+                if conditions:
+                    query += f" WHERE {' AND '.join(conditions)}"
                 token = ""
                 while True:
                     payload: dict[str, Any] = {"query": query, "pageSize": REPORT_PAGE_SIZE}
@@ -222,15 +277,16 @@ class GoogleMerchantReports(GoogleReportSource):
                     for row in rows:
                         inner = row.get(key) if isinstance(row, dict) else None
                         if not isinstance(inner, dict):
-                            raise _fail("Merchant Center returned an invalid daily row.")
-                        day = _date_of(inner.get("date"))
+                            raise _fail("Merchant Center returned an invalid row.")
                         counts = (inner[m] for m in ("clicks", "impressions") if m in inner)
-                        if (
-                            day is None
-                            or not start <= day <= end
-                            or not all(_number(c) for c in counts)
-                        ):
-                            raise _fail("Merchant Center returned an invalid daily row.")
+                        if not all(_number(c) for c in counts):
+                            raise _fail("Merchant Center returned an invalid row.")
+                        if mode == "daily":
+                            day = _date_of(inner.get("date"))
+                            if day is None or window is None or not window[0] <= day <= window[1]:
+                                raise _fail("Merchant Center returned an invalid daily row.")
+                        else:
+                            day = today
                         records.append(row)
                         days.append(day)
                     token = body.get("nextPageToken") or ""
