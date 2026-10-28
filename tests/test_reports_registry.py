@@ -34,6 +34,7 @@ PROVIDERS = [
     "facebook_pages",
     "google_ads",
     "google_analytics",
+    "google_business_profile",
     "google_merchant",
     "google_search_console",
     "instagram",

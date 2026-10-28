@@ -16,6 +16,7 @@ registry first loads. An application builds a source from a `ConnectorConfig`:
 |---|---|---|---|---|
 | `google_analytics` | `GoogleAnalyticsReports` (`google_analytics`) | GA4 Data + Admin API | `client_id`, `client_secret`, `redirect_uri` | |
 | `google_search_console` | `SearchConsoleReports` (`search_console`) | Search Console API | same | |
+| `google_business_profile` | `GoogleBusinessProfileReports` (`google_business_profile`) | Business Profile APIs (account management, business information, performance, v4 reviews) | same | |
 | `google_merchant` | `GoogleMerchantReports` (`google_merchant`) | Merchant API (`accounts/v1`, `reports/v1`) | same | |
 | `google_ads` | `GoogleAdsReports` (`google_ads`) | Google Ads REST (`googleAds:search`) | same + `developer_token` (for reads) | `api_version` (`v26`) |
 | `meta_ads` | `MetaAdsReports` (`meta_ads`) | Graph API | `app_id`, `app_secret`, `redirect_uri` | `api_version` (`v26.0`) |
@@ -69,6 +70,7 @@ Every source implements `authorize_url(state)`, `exchange_code(code) -> Grant`,
 |---|---|---|---|
 | `google_analytics` | `refresh_token` (email) | `properties/{id}` (`group`: GA account) | `dimensions`, `metrics`, `day_column`? (`date`) |
 | `google_search_console` | `refresh_token` (email) | site URL | `dimensions` (first is `date`), `search_type`? (`web`; also `image`, `video`, `news`, `discover`, `googleNews`) |
+| `google_business_profile` | `refresh_token` (email) | `accounts/{account}/locations/{location}` (`group`: the account) | `report`: `daily_metrics` (a record per day, `{date, metrics}`), `search_keywords` (`months`? 12, a record per keyword and month, no day) or `reviews` (as they are now, no day); the project needs Business Profile API access approved by Google |
 | `google_merchant` | `refresh_token` (email) | merchant id (digits) | `view` (one of the Merchant API's report tables), `fields` (snake_case query-language fields), `mode`? (`daily`, with `date` among the fields, or `snapshot`: as it is now, rows labelled today), `filters`? (`{field: [literal, ...]}`, a query per combination; `'RO'`, `166` or `WEEKLY`; no values reads nothing), `trailing_days`? (snapshot over the days ending `until`); the Google Cloud project must be registered with the merchant account |
 | `google_ads` | `refresh_token` (email) | `customer`, or `customer:manager` for a customer reached through a manager (`group`) | `resource`, `fields` |
 | `meta_ads` | `access_token` (the user's name, ~60 days) | `act_{id}` | `fields`, `level`, `breakdowns`?, `time_increment`?, `day_column`? |
