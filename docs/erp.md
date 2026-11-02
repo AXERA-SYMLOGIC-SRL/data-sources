@@ -72,6 +72,10 @@ async with source:                           # one connection (and one sign-in) 
 - **Spec:** `{"model", "domain"?, "extra"?, "fields"?}`. Without `fields`, every stored field the user may read is
   asked for (custom `x_` fields included, minus the skipped ones above), plus the `extra` ones the model has
   (non-stored fields the application wants, such as `product.product.list_price`); `fields` asks for exactly those.
+- **Asking directly** (an agent's question, not a sync): `search(model, domain, fields, order, limit, offset)` gives
+  the records and how many match (`search_read`, `search_count`); `group(model, domain, groupby, aggregates, order,
+  limit)` gives totals per group, each aggregate under its spec (`amount_total:sum`) plus `__count`:
+  `formatted_read_group` from Odoo 19, `read_group` before (mapped to the same shape). Same context as a read.
 - **Models:** `models()` reads `ir.model`: not transient, not abstract (19 and later can say), with a stored
   `write_date` (`ir.model.fields`), and not Odoo's machinery (`TECHNICAL_MODELS`: settings, users and groups, the
   chatter and live chat, the bus, website, reports, ...). 292 on the local Odoo 19 with ~40 apps.

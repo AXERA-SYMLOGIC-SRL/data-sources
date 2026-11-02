@@ -290,6 +290,20 @@ class FakeOdoo:
             return httpx.Response(200, json=[{"model": m} for m in installed if m in wanted])
         if method == "fields_get":
             return httpx.Response(200, json=self.FIELDS)
+        if method == "formatted_read_group":
+            groups = [{"country_id": [185, "Romania"], "id:count_distinct": 2, "__count": 2}]
+            return httpx.Response(200, json=groups)
+        if method == "read_group":
+            groups = [
+                {
+                    "country_id": [185, "Romania"],
+                    "id": 2,
+                    "__count": 2,
+                    "__domain": [["country_id", "=", 185]],
+                    "__context": {},
+                }
+            ]
+            return httpx.Response(200, json=groups)
         rows = self.records.get(model)
         if rows is None:
             if method == "search_count" and model in ("sale.order", "account.move"):
@@ -611,3 +625,38 @@ async def test_busy_then_answering_is_read() -> None:
 )
 def test_a_pasted_browser_address_is_cut_to_the_instance(pasted: str, base: str) -> None:
     assert FakeOdoo().source(url=pasted).base_url == base
+
+
+@pytest.mark.parametrize("version", [19, 17])
+async def test_search_answers_the_records_a_domain_matches_and_their_total(version: int) -> None:
+    rows = [partner(i, f"2026-10-0{i} 10:00:00") for i in range(1, 4)]
+    odoo = FakeOdoo(version=version, records={"res.partner": rows})
+    found, total = await odoo.source(username="admin").search(
+        "res.partner", [], ["name", "country_id"], limit=2, offset=1
+    )
+    assert total == 3 and [r["id"] for r in found] == [2, 3]
+    assert found[0] == {"id": 2, "name": "Partner 2", "country_id": [185, "Romania"]}
+    call = next(c for c in odoo.calls if c[1] == "search_read" and c[0] == "res.partner")
+    assert (
+        call[2]["fields"] == ["name", "country_id"] and call[2]["context"]["active_test"] is False
+    )
+
+
+async def test_group_asks_formatted_read_group_from_19() -> None:
+    odoo = FakeOdoo(version=19)
+    rows = await odoo.source().group("res.partner", [], ["country_id"], ["id:count_distinct"])
+    assert rows == [{"country_id": [185, "Romania"], "id:count_distinct": 2, "__count": 2}]
+    call = next(c for c in odoo.calls if c[1] == "formatted_read_group")
+    assert call[2]["groupby"] == ["country_id"]
+    assert call[2]["aggregates"] == ["id:count_distinct", "__count"]
+
+
+async def test_group_asks_read_group_before_19_in_the_same_shape() -> None:
+    odoo = FakeOdoo(version=17)
+    rows = await odoo.source(username="admin").group(
+        "res.partner", [], ["country_id"], ["id:count_distinct"]
+    )
+    # The aggregate under its spec, Odoo's internal keys dropped.
+    assert rows == [{"country_id": [185, "Romania"], "id:count_distinct": 2, "__count": 2}]
+    call = next(c for c in odoo.calls if c[1] == "read_group")
+    assert call[2]["lazy"] is False and call[2]["fields"] == ["id:count_distinct"]

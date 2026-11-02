@@ -199,6 +199,7 @@ class OdooSource(ErpSource):
         self._client: ApiClient | None = None
         self._entered = 0
         self._version: str = ""
+        self._major = 0
         self._api: str | None = None
         self._uid: int | None = None
         self._companies: list[int] | None = None
@@ -280,6 +281,7 @@ class OdooSource(ErpSource):
             raise INVALID.error()
         self._version = str(info.get("server_version", ""))
         major = (info.get("server_version_info") or [0])[0]
+        self._major = major if isinstance(major, int) else 0
         self._api = "json2" if isinstance(major, int) and major >= JSON2_FROM else "jsonrpc"
 
     async def _login(self) -> None:
@@ -526,6 +528,100 @@ class OdooSource(ErpSource):
         if not isinstance(found, list):
             raise INVALID.error()
         return [str(i) for i in found]
+
+    # Asking Odoo directly (an agent's question, not a sync): the records or totals a domain
+    # matches, as the user, with the same context as a read (archived included, every company).
+
+    async def search(
+        self,
+        model: str,
+        domain: list[Any],
+        fields: list[str],
+        *,
+        order: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """The records `domain` matches, `fields` of each (`search_read`, Odoo's values), and how
+        many match in all."""
+        async with self:
+            await self._ready()
+            rows = await self._raw_call(
+                model,
+                "search_read",
+                domain=domain,
+                fields=fields,
+                offset=offset,
+                limit=limit,
+                order=order or "id",
+            )
+            total = await self._raw_call(model, "search_count", domain=domain)
+        if not isinstance(rows, list) or not isinstance(total, int):
+            raise INVALID.error()
+        return [r for r in rows if isinstance(r, dict)], total
+
+    async def group(
+        self,
+        model: str,
+        domain: list[Any],
+        groupby: list[str],
+        aggregates: list[str],
+        *,
+        order: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Totals of `domain`'s records per group: `groupby` are fields (`partner_id`) or dates
+        with a granularity (`date_order:month`); `aggregates` are `field:function` (`sum`, `avg`,
+        `min`, `max`, `count_distinct`) or `__count`. Each row maps every group and aggregate spec
+        as given to its value (a many2one as `[id, name]`), plus `__count`. Odoo 19 and later answer
+        `formatted_read_group`; older versions `read_group`."""
+        async with self:
+            await self._ready()
+            if self._major >= JSON2_FROM:
+                rows = await self._raw_call(
+                    model,
+                    "formatted_read_group",
+                    domain=domain,
+                    groupby=groupby,
+                    aggregates=[*aggregates, "__count"]
+                    if "__count" not in aggregates
+                    else aggregates,
+                    order=order,
+                    limit=limit,
+                )
+            else:
+                rows = await self._raw_call(
+                    model,
+                    "read_group",
+                    domain=domain,
+                    fields=[a for a in aggregates if a != "__count"],
+                    groupby=groupby,
+                    orderby=order or False,
+                    limit=limit,
+                    lazy=False,
+                )
+                rows = (
+                    [_from_read_group(r, aggregates) for r in rows]
+                    if isinstance(rows, list)
+                    else rows
+                )
+        if not isinstance(rows, list):
+            raise INVALID.error()
+        return [r for r in rows if isinstance(r, dict)]
+
+
+def _from_read_group(row: Any, aggregates: list[str]) -> Any:
+    """A `read_group` row (Odoo before 19: an aggregate under its field's name, `__count` for
+    the count, internal `__domain`/`__context` keys) in `formatted_read_group`'s shape: each
+    aggregate under its spec (`amount_total:sum`)."""
+    if not isinstance(row, dict):
+        return row
+    found = {k: v for k, v in row.items() if not k.startswith("__") or k == "__count"}
+    for spec in aggregates:
+        name = spec.split(":", 1)[0]
+        if spec != "__count" and name in found:
+            found[spec] = found.pop(name)
+    return found
 
 
 def _model(spec: Spec) -> str:
