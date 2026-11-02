@@ -92,17 +92,28 @@ class ApiClient:
         await self._http.__aexit__(exc_type, exc, tb)
 
     async def request(
-        self, method: str, url: str, *, retry: bool | None = None, **kwargs: Any
+        self,
+        method: str,
+        url: str,
+        *,
+        retry: bool | None = None,
+        max_bytes: int | None = None,
+        too_large: Problem | None = None,
+        **kwargs: Any,
     ) -> httpx.Response:
         """The response once `classify` accepts it. Only idempotent methods are retried unless
         `retry` says so (a report query sent as POST is safe to repeat; creating something is
-        not)."""
+        not). With `max_bytes` the body is streamed and the request fails with `too_large` (not
+        retried) as soon as more than that has arrived, before it is all held in memory."""
         repeat = method.upper() in IDEMPOTENT if retry is None else retry
         attempts = self.attempts if repeat else 1
         for attempt in range(attempts):
             last = attempt == attempts - 1
             try:
-                response = await self._http.request(method, url, **kwargs)
+                if max_bytes is None:
+                    response = await self._http.request(method, url, **kwargs)
+                else:
+                    response = await self._capped(method, url, max_bytes, too_large, **kwargs)
             except httpx.HTTPError:
                 # The exception's text can hold the URL, and with it a token in the query.
                 if last:
@@ -120,6 +131,31 @@ class ApiClient:
                 raise verdict.error()
             return response
         raise AssertionError("unreachable")
+
+    async def _capped(
+        self, method: str, url: str, max_bytes: int, too_large: Problem | None, **kwargs: Any
+    ) -> httpx.Response:
+        """The response with its body read as it arrives (as sent, before any content
+        decoding), refused past `max_bytes`."""
+        request = self._http.build_request(method, url, **kwargs)
+        response = await self._http.send(request, stream=True)
+        if response.is_stream_consumed:
+            # A transport that answered with a body already in memory (httpx reads those at once).
+            if len(response.content) > max_bytes:
+                raise (too_large or self.invalid).error()
+            return response
+        try:
+            body, size = [], 0
+            async for chunk in response.aiter_raw():
+                size += len(chunk)
+                if size > max_bytes:
+                    raise (too_large or self.invalid).error()
+                body.append(chunk)
+        finally:
+            await response.aclose()
+        return httpx.Response(
+            response.status_code, headers=response.headers, content=b"".join(body), request=request
+        )
 
     async def json(
         self, method: str, url: str, *, retry: bool | None = None, **kwargs: Any

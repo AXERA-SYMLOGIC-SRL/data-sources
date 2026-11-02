@@ -237,6 +237,22 @@ async def test_json_that_is_not_an_object_is_invalid(response: httpx.Response) -
     assert len(seen) == 1
 
 
+async def test_a_capped_request_reads_the_body_up_to_the_cap_and_is_otherwise_the_same() -> None:
+    too_large = Problem("request_failed", "Too large.")
+    handler, seen = replay(httpx.Response(503), httpx.Response(200, content=b"x" * 10))
+    sleeper = Sleeper()
+    async with api(handler, sleeper) as client:
+        response = await client.request("GET", URL, max_bytes=10, too_large=too_large)
+    assert response.content == b"x" * 10 and response.status_code == 200
+    assert len(seen) == 2 and sleeper.waits == [0.5]  # still classified and retried
+
+    handler, seen = replay(httpx.Response(200, content=b"x" * 11))
+    async with api(handler, Sleeper()) as client:
+        with pytest.raises(ReportError) as caught:
+            await client.request("GET", URL, max_bytes=10, too_large=too_large)
+    assert caught.value.message == "Too large." and len(seen) == 1  # never retried
+
+
 async def test_client_sends_base_url_and_headers() -> None:
     handler, seen = replay(httpx.Response(200, json={}))
     async with api(

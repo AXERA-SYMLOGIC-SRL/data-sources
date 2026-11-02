@@ -23,9 +23,11 @@ def consent_url(base: str, **params: str) -> str:
     return f"{base}?{urlencode(params)}"
 
 
-def email_from_id_token(id_token: object) -> str | None:
-    """The email claim of an OpenID `id_token`. Not verified: the token came straight from the
-    provider's token endpoint over TLS, and it is only shown as a label."""
+def email_from_id_token(id_token: object, keys: tuple[str, ...] = ("email",)) -> str | None:
+    """The first non-empty string claim among `keys` of an OpenID `id_token` (the email by
+    default; a personal Microsoft account often has only `preferred_username`). Not verified: the
+    token came straight from the provider's token endpoint over TLS, and it is only shown as a
+    label."""
     if not isinstance(id_token, str) or not id_token:
         return None
     try:
@@ -33,8 +35,13 @@ def email_from_id_token(id_token: object) -> str | None:
         claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
     except (IndexError, ValueError):
         return None
-    email = claims.get("email") if isinstance(claims, dict) else None
-    return email if isinstance(email, str) else None
+    if not isinstance(claims, dict):
+        return None
+    for key in keys:
+        value = claims.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def is_google_token_request(response: httpx.Response) -> bool:

@@ -21,9 +21,11 @@ registry first loads. An application builds a source from a `ConnectorConfig`:
 | `google_ads` | `GoogleAdsReports` (`google_ads`) | Google Ads REST (`googleAds:search`) | same + `developer_token` (for reads) | `api_version` (`v26`) |
 | `meta_ads` | `MetaAdsReports` (`meta_ads`) | Graph API | `app_id`, `app_secret`, `redirect_uri` | `api_version` (`v26.0`) |
 | `tiktok_ads` | `TikTokAdsReports` (`tiktok_ads`) | Marketing API v1.3 | `app_id`, `app_secret`, `redirect_uri` | |
+| `microsoft_ads` | `MicrosoftAdsReports` (`microsoft_ads`) | Microsoft Advertising REST v13 (Customer Management, Reporting) | `client_id`, `client_secret` (an Entra ID web app), `developer_token`, `redirect_uri` | `environment` (`production`; `sandbox`), `tenant` (`common`), `report_timeout` (600 s) |
 | `tiktok_organic` | `TikTokOrganicReports` (`tiktok_organic`) | TikTok Display API v2 | `client_key`, `client_secret`, `redirect_uri` | |
 | `facebook_pages` | `FacebookPagesReports` (`meta_organic`) | Graph API (Pages) | same as `meta_ads` (the same app) | `api_version` |
 | `instagram` | `InstagramReports` (`meta_organic`) | Graph API (Instagram) | same as `meta_ads` (the same app) | `api_version` |
+| `bing_webmaster` | `BingWebmasterReports` (`bing_webmaster`) | Bing Webmaster API (JSON, `ssl.bing.com/webmaster/api.svc/json`) | `client_id`, `client_secret`, `redirect_uri` (an OAuth client registered in Bing Webmaster Tools → Settings → API Access, not Azure) | |
 
 The credentials are the **application's** (its OAuth client); what a user's consent buys comes
 back as a `Grant` and is passed to every later call.
@@ -75,9 +77,11 @@ Every source implements `authorize_url(state)`, `exchange_code(code) -> Grant`,
 | `google_ads` | `refresh_token` (email) | `customer`, or `customer:manager` for a customer reached through a manager (`group`) | `resource`, `fields` |
 | `meta_ads` | `access_token` (the user's name, ~60 days) | `act_{id}` | `fields`, `level`, `breakdowns`?, `time_increment`?, `day_column`? |
 | `tiktok_ads` | `access_token`, `advertiser_ids` | advertiser id (one of those) | `data_level`, `dimensions`, `metrics`, `report_type`? (`BASIC`; `AUDIENCE` for audience dimensions such as `gender`, `age`, `country_code`) |
+| `microsoft_ads` | `refresh_token`, `scope` (email, else `preferred_username`). Microsoft rotates the refresh token: `refresh_grant` returns the newest, keep it | `{account id}:{parent customer id}` (`details`: `account_id`, `customer_id`, `number`, `status`) | `report` (a Reporting `...ReportRequest` type), `attributes`, `metrics`, `day_column` (`TimePeriod`): the CSV's columns, aggregated by day; records are `{column: text}` |
 | `tiktok_organic` | `access_token`, `refresh_token`, `open_id`, `scope` (`expires_in`: the refresh token's) | the user's `open_id` | `report` (`account` or `videos`): a snapshot of now, every record labelled with today. Tokens last a day: `refresh_grant` renews them |
 | `facebook_pages` | `access_token` (the user's name, ~60 days) | a Page id | `report`: `daily` (a record per day, `{"metrics": {...}}`), `page` and `posts` (snapshots) |
 | `instagram` | `access_token` (the user's name, ~60 days) | the Instagram account id (`group`: its Page) | `report`: `daily` (a record per day), `account`, `media` and `audience` (snapshots) |
+| `bing_webmaster` | `access_token` (an hour), `refresh_token` (the latest), `consent_refresh_token` (the consent's, never replaced), `expires_at` (ISO, UTC); no identity | a verified site URL | `report`: `traffic` (`GetRankAndTrafficStats`, daily), `crawl` (`GetCrawlStats`, daily), `queries` / `pages` (`GetQueryStats` / `GetPageStats`, top queries and pages by week, the page URL in `Query`). Scope `webmaster.read`. Bing has no date parameters: every call returns all it keeps (~6 months), `read` keeps the rows dated in `since..until` (WCF dates, `/Date(ms±hhmm)/`), and the envelope's `available` says how many rows and which days Bing had. `refresh_grant` tries the latest refresh token, then the consent's (a rotated token was reported refused). **Not run against a live account:** the API host for Bearer tokens, refresh rotation, the fault's shape and the weekly label's meaning are from Microsoft's docs, which disagree in places |
 
 A source keeps its provider's own calls too, for what doesn't fit the interface: GA's
 `list_fields` (a property's dimensions and metrics, custom ones included), Meta's
@@ -125,9 +129,20 @@ Everything a provider refuses raises `ReportError` with a `reason`; `ReportAuthE
 | `no_refresh_token` | Google's consent returned no refresh token |
 | `access_denied` | the consent didn't grant the scope asked for |
 | `customer_not_enabled` | a Google Ads customer is disabled (skipped when listing customers) |
+| `report_timeout` | an asynchronous report (Microsoft Advertising) wasn't built within the source's `report_timeout` |
 
 Messages never contain a credential or the provider's response body; Google Ads refusals are
 logged (`data-sources.google_ads.client`) with every credential of the request removed.
+
+### Asynchronous reports (Microsoft Advertising)
+
+Microsoft builds a report on request: `read` submits it, polls it (after 2, 4, 8 and 16 s, then
+every 30 s), and downloads the zipped CSV once, all within `report_timeout` (requests and the
+download count too). A report built without a
+download link is empty, not an error. The link is a pre-signed storage URL, a credential: it is
+fetched by a client that sends no other credential, redacted from httpx's request log, and never
+put on the envelope or in an error. The download and the CSV are read as they arrive and refused
+past 512 MiB (`ApiClient.request(max_bytes=...)` streams any body this way).
 
 ## Retries and tests
 

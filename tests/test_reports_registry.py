@@ -31,6 +31,7 @@ from data_sources.reports import (
 from data_sources.reports.oauth import GOOGLE_TOKEN_URL
 
 PROVIDERS = [
+    "bing_webmaster",
     "facebook_pages",
     "google_ads",
     "google_analytics",
@@ -39,6 +40,7 @@ PROVIDERS = [
     "google_search_console",
     "instagram",
     "meta_ads",
+    "microsoft_ads",
     "tiktok_ads",
     "tiktok_organic",
 ]
