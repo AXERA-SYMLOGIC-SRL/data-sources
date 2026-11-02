@@ -1,11 +1,13 @@
 # ERP sources (`data_sources.erp`)
 
-Read-only adapters for ERPs: the records of a business (parties, products, orders and their lines, invoices,
-payments, the general ledger, stock, production, CRM, projects, people) in **one vocabulary for every ERP**, read
-**incrementally**, for an application that keeps its own copy. Odoo is the first adapter.
+Read-only adapters for ERPs: a business's own records (parties, products, orders and their lines, invoices,
+payments, the general ledger, stock, production, CRM, projects, people), read **incrementally** and returned **as the
+ERP answers them**, for an application that keeps its own copy. Odoo is the first adapter.
 
-ERPs share no API, so the contract is the **catalog** (`catalog.py`): canonical entities with core columns. Each
-adapter maps the entities it has onto its own objects and keeps the complete native record beside them.
+Like a report source, an ERP source reads what the application asks for, described by a **spec in the ERP's own
+terms** (for Odoo `{"model": "sale.order"}`); what the records mean, and which of their fields matter, is the
+application's business. (An earlier version mapped every ERP onto one catalog of 29 canonical entities; it renamed
+Odoo's fields, hid everything the catalog didn't cover, and was retired.)
 
 ## Use
 
@@ -22,72 +24,67 @@ source = create_erp_source(
         ),
     )
 )
-info = await source.check()            # SourceInfo(version, api, user, companies)
-for entity in await source.entities():  # the catalog entities this instance has
-    cursor = None                       # or the last cursor stored: only what changed since
-    while True:
-        page = await source.read(entity, cursor)  # Page(records: [ErpRecord], next_cursor)
-        store(page.records)                       # ErpRecord(id, updated_at, values, raw)
-        if page.next_cursor is None:
-            break
-        cursor = page.next_cursor
-ids_now = await source.list_ids("sale_orders")  # what you store and isn't here was deleted
+specs = {"sale_order": {"model": "sale.order"}, "sale_order_line": {"model": "sale.order.line"}}
+async with source:                           # one connection (and one sign-in) for the whole sync
+    info = await source.check()              # SourceInfo(version, api, user, companies)
+    for name in await source.available(specs):  # installed, and readable by the user
+        cursor = None                        # or the last cursor stored: only what changed since
+        while True:
+            page = await source.read(specs[name], cursor)  # Page(records: [ErpRecord], next_cursor)
+            store(page.records)                            # ErpRecord(id, updated_at, raw)
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+    ids_now = await source.list_ids(specs["sale_order"])  # what you store and isn't here was deleted
+    fields = await source.fields(specs["sale_order"])     # NativeField(name, label, type, relation, stored,
+                                                          #             selection, help), custom ones included
 ```
 
-- `values`: the catalog's core columns for the entity. A `ref` column holds the other record's id (text) and the
-  adapter fills `<name without _id>_name` with its display name when the ERP gives one.
-- `raw`: the native record, except child-id lists, binaries, HTML bodies, chatter fields, and anything whose name
-  contains `token`, `password`, `secret`, `signature` or `api_key` (Odoo's portal `access_token` must not leave it).
+- `raw`: the record as the ERP returned it, minus child-id lists, binaries, HTML bodies, chatter fields and anything
+  whose name contains a `SECRET_WORDS` word (`token`, `password`, `secret`, `signature`, `api_key`: Odoo's portal
+  `access_token` must not leave it).
 - **Cursor** `(updated_at, offset)`: records changed at or after `updated_at`, skipping the first `offset` of that
-  second. ERPs report change times in whole seconds and bulk operations change thousands of records in one second,
-  so a `(time, id)` keyset would lose records. To resume later, start from a stored time (a little earlier, offset 0):
-  re-reading a few records is harmless when you upsert by id.
+  second. ERPs report change times in whole seconds and bulk operations change thousands of records in one second;
+  Odoo even stores microseconds it doesn't return, so `write_date = t` matches nothing and a `(time, id)` keyset would
+  lose records. To resume later, start from a stored time (no offset): re-reading a few records is harmless when you
+  upsert by id.
 - **Deletions**: ERPs don't report them; compare `list_ids` with what you hold.
 - **Errors**: `data_sources.reports.ReportError` with `reason` `auth_failed`, `unreachable`, `database_not_found`,
-  `unavailable` (retried first), `request_failed`, `not_configured`. Messages never hold the key or the ERP's
-  response (Odoo puts a server traceback in its errors).
-
-## The catalog
-
-29 entities: `companies`, `currencies`, `partners` (customers and vendors in one), `users`, `product_categories`,
-`products`, `warehouses`, `locations`, `sale_orders`, `sale_order_lines`, `purchase_orders`, `purchase_order_lines`,
-`invoices` (customer and vendor, `direction` out/in, `kind` invoice/refund), `invoice_lines`, `accounts`,
-`journal_items` (the general ledger), `payments`, `stock_pickings`, `stock_moves`, `stock_quants` (stock on hand),
-`manufacturing_orders`, `crm_leads`, `employees`, `projects`, `tasks`, `timesheets`, `expenses`, `pos_orders`,
-`pos_order_lines`. Every entity also has `id` and `updated_at`. Every column has a description (the conventions are
-in `COMMON`: amounts are in the document's `currency` and never negative, a credit note is told apart by `kind`;
-`_company` amounts are in the company's currency and signed).
-
-It is close to what unified accounting and commerce APIs converge on (Merge, Codat, Apideck: contacts, items,
-invoices with direction, payments, accounts, journal entries, orders), extended with stock, production, CRM and
-projects. Add a column when a second ERP can fill it too; an ERP-only field stays in `raw`.
+  `access_denied` (the user may not read that model: skip it), `unavailable` (retried first), `request_failed`,
+  `not_configured`. Messages never hold the key; `diagnostics` holds the ERP's own error name and message, never its
+  traceback.
 
 ## Odoo (`sources/odoo.py`)
 
-- **Connection:** `url`, `database`, `api_key` (Odoo: avatar → My Profile → Account Security → New API Key) and, for
-  Odoo before 19 only, `username`. The user's access rights apply.
+- **Connection:** `url`, `database`, `api_key` (Odoo: avatar → My Profile → Account Security → New API Key) and
+  `username` (the login): needed before Odoo 19, optional after.
 - **API:** Odoo 19+ through JSON-2 (`POST /json/2/<model>/<method>`, `Authorization: bearer <key>`,
-  `X-Odoo-Database`); 16–18 through `execute_kw` over `/jsonrpc` (`common.authenticate` with the login and key first).
-  The version comes from `/web/webclient/version_info`. Odoo plans to remove `/xmlrpc` and `/jsonrpc` in Odoo 22
-  (Odoo Online: 21.1); JSON-2 on Odoo Online needs a custom plan.
-- **Reads:** `search_read` with every stored field (minus the skipped ones above), ordered `write_date, id`,
-  `active_test=False` (archived records included) and every company the user may access (`allowed_company_ids`).
-  An unknown database is a 404 HTML page (`database_not_found`); an unknown model a 404 JSON error.
-- **Mapping:** `ODOO` maps each entity to a model, a domain (invoices are `account.move` of four `move_type`s;
-  invoice lines are their `display_type = product` lines) and its columns (a native field, or `Derived` for
-  computed ones: `direction`, `kind`, a lead's `status`, a product's `type`). An entity whose model isn't installed
-  isn't in `entities()`.
-- Measured on a local Odoo 19 with a year of seeded history (≈30,000 records over 29 entities): a full read in
-  ≈27 s, ≈1,100 records/s at 1,000 per page.
+  `X-Odoo-Database`, named arguments); 16–18 through `execute_kw` over `/jsonrpc` (`common.authenticate` with the
+  login and key first). On 19+, a key JSON-2 refuses is tried over JSON-RPC when a login is given, where the secret
+  may be a password (Odoo's demo databases). The version comes from `/web/webclient/version_info`. Odoo removes
+  `/xmlrpc` and `/jsonrpc` in Odoo 22 (Odoo Online: 21.1); Odoo Online opens the external API on its Custom plan only.
+- **Spec:** `{"model", "domain"?, "extra"?, "fields"?}`. Without `fields`, every stored field the user may read is
+  asked for (custom `x_` fields included, minus the skipped ones above), plus the `extra` ones the model has
+  (non-stored fields the application wants, such as `product.product.list_price`); `fields` asks for exactly those.
+- **Reads:** `search_read` ordered `write_date, id`, with `active_test=False` (archived records included), every
+  company the user may access (`allowed_company_ids`) and `lang=en_US`. `available` checks `ir.model` and a
+  zero-record `search_count` per model (an `AccessError` means not readable). An unknown database is a 404 HTML page
+  (`database_not_found`); an unknown model a 404 JSON error (`request_failed`); a model the user may not read an
+  `AccessError` (`access_denied`, not an auth failure).
+- **Values** are Odoo's: a many2one is `[id, "display name"]`, a many2many a list of ids, every empty value `false`
+  (a `false` boolean too), datetimes `YYYY-MM-DD HH:MM:SS` in UTC.
+- Measured: a local Odoo 19 with a year of seeded history, 43 models, 27,873 records in ≈39 s; the hosted Odoo 20
+  Enterprise demo, 3,096 records in ≈18 s over the internet (through the JSON-RPC fallback).
+- `tests/test_odoo_live.py` (opt-in) runs against a real Odoo: `ODOO_TEST_URL/DB/KEY[/USER]`, or `ODOO_TEST_DEMO=1`
+  for a fresh database from `https://demo.odoo.com/start`.
 
 ## Adding an ERP
 
 A module `data_sources/erp/sources/<provider>.py` with an `ErpSource` subclass (`provider`, `app_credentials`, and
-`check`, `entities`, `describe`, `count`, `read`, `list_ids`); the registry finds it, nothing is registered by hand.
-Map the catalog entities it has onto its objects; keep requests on `reports.http.ApiClient` with a `classify` for its
-error shapes; test it on `httpx.MockTransport` (see `tests/test_erp.py`, which fakes Odoo 19 and 18).
-
-What changes per ERP is only what the adapter hides:
+`check`, `available`, `fields`, `count`, `read`, `list_ids`; `__aenter__`/`__aexit__` to share a connection); the
+registry finds it, nothing is registered by hand. Define its spec in its own terms; keep requests on
+`reports.http.ApiClient` with a `classify` for its error shapes; test it on `httpx.MockTransport` (see
+`tests/test_erp.py`, which fakes Odoo 19 and 18).
 
 | | Odoo | ERPNext / Frappe | Dolibarr |
 |---|---|---|---|

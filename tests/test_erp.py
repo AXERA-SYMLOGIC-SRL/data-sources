@@ -1,5 +1,5 @@
-"""ERP sources: drop-in discovery, the catalog, and the Odoo adapter on a fake Odoo (JSON-2 for 19,
-JSON-RPC `execute_kw` before)."""
+"""ERP sources: drop-in discovery, and the Odoo source on a fake Odoo (JSON-2 for 19 and later,
+JSON-RPC `execute_kw` before, and as the fallback for a password)."""
 
 from __future__ import annotations
 
@@ -17,8 +17,6 @@ import pytest
 from data_sources.config.schema import AuthConfig, ConnectorConfig
 from data_sources.core.exceptions import ConnectorNotFoundError
 from data_sources.erp import (
-    CATALOG,
-    ENTITIES,
     Cursor,
     ErpSource,
     create_erp_source,
@@ -26,36 +24,13 @@ from data_sources.erp import (
     erp_sources,
 )
 from data_sources.erp.registry import ErpSourceRegistry
-from data_sources.erp.sources.odoo import ODOO, OdooSource
+from data_sources.erp.sources.odoo import OdooSource, classify
 from data_sources.reports import ReportError
 
 KEY = "private-api-key-123"
+PASSWORD = "admin-password"
 UTC = dt.UTC
-
-# --- the catalog ---------------------------------------------------------------------------------
-
-
-def test_catalog_references_resolve_and_names_are_unique() -> None:
-    for entity in CATALOG:
-        names = [c.name for c in entity.columns]
-        assert len(names) == len(set(names)), entity.name
-        assert not {"id", "updated_at", "raw"} & set(names), entity.name
-        for column in entity.columns:
-            assert column.type != "ref" or column.references in ENTITIES, (entity.name, column.name)
-
-
-def test_ref_columns_have_a_name_column() -> None:
-    order = ENTITIES["sale_orders"]
-    assert order.column("partner_id").name_column == "partner_name"
-    assert order.column("number").name_column is None
-    assert order.references["partner_id"] == "partners"
-
-
-def test_odoo_maps_every_catalog_entity_onto_catalog_columns() -> None:
-    assert set(ODOO) == set(ENTITIES)
-    for name, spec in ODOO.items():
-        assert set(spec.columns) <= {c.name for c in ENTITIES[name].columns}, name
-
+PARTNERS = {"model": "res.partner"}
 
 # --- discovery -----------------------------------------------------------------------------------
 
@@ -69,19 +44,19 @@ class {name}(ErpSource):
     async def check(self):
         return SourceInfo("1", "rest", "me", [])
 
-    async def entities(self):
-        return ["partners"]
+    async def available(self, specs):
+        return list(specs)
 
-    async def describe(self, entity):
+    async def fields(self, spec):
         return []
 
-    async def count(self, entity):
+    async def count(self, spec):
         return 0
 
-    async def read(self, entity, cursor=None, page_size=1000):
+    async def read(self, spec, cursor=None, page_size=1000):
         return Page([], None)
 
-    async def list_ids(self, entity):
+    async def list_ids(self, spec):
         return []
 """
 
@@ -148,30 +123,36 @@ def partner(i: int, written: str) -> dict[str, Any]:
         "id": i,
         "name": f"Partner {i}",
         "is_company": True,
-        "parent_id": False,
-        "customer_rank": 1,
-        "supplier_rank": 0,
-        "email": False,
-        "phone": "123",
-        "city": "Iasi",
         "country_id": [185, "Romania"],
-        "vat": False,
-        "user_id": [2, "Mitchell Admin"],
-        "active": True,
-        "create_date": "2026-01-02 03:04:05",
-        "company_id": [1, "My Company"],
+        "email": False,
+        "x_studio_tier": "gold",
+        "display_name": f"Partner {i}",
         "write_date": written,
         "access_token": "portal-secret",
+        "child_ids": [9],
+        "image_1920": "base64",
     }
 
 
+async def no_wait(_: float) -> None:
+    return None
+
+
 class FakeOdoo:
-    """Odoo 19 (`json2`) or 18 (`jsonrpc`), with `records` per model, filtered by `write_date >=`
-    and paged by offset/limit like the real one."""
+    """Odoo `version` (JSON-2 from 19, JSON-RPC always), with `records` per model, filtered by
+    `write_date >=` and paged by offset/limit like the real one. JSON-2 takes only the key;
+    JSON-RPC takes the key or the password. Models in `forbidden` answer `AccessError`."""
 
     FIELDS = {
         "name": {"type": "char", "store": True, "string": "Name"},
-        "x_studio_tier": {"type": "selection", "store": True, "string": "Tier"},
+        "is_company": {"type": "boolean", "store": True, "string": "Is a Company"},
+        "email": {"type": "char", "store": True, "string": "Email"},
+        "x_studio_tier": {
+            "type": "selection",
+            "store": True,
+            "string": "Tier",
+            "selection": [["gold", "Gold"], ["silver", "Silver"]],
+        },
         "access_token": {"type": "char", "store": True, "string": "Security Token"},
         "child_ids": {"type": "one2many", "store": True, "string": "Contacts"},
         "message_ids": {"type": "one2many", "store": True, "string": "Messages"},
@@ -183,27 +164,28 @@ class FakeOdoo:
             "store": True,
             "relation": "res.country",
             "string": "Country",
+            "help": "The country.",
         },
         "write_date": {"type": "datetime", "store": True, "string": "Last updated"},
-        # Every other field the partner mapping reads.
-        **{
-            n: {"type": "char", "store": True, "string": n}
-            for n in ODOO["partners"].native
-            if n != "country_id"
-        },
     }
 
     def __init__(
-        self, version: int = 19, records: dict[str, list[dict[str, Any]]] | None = None
+        self,
+        version: int = 19,
+        records: dict[str, list[dict[str, Any]]] | None = None,
+        forbidden: tuple[str, ...] = (),
     ) -> None:
         self.version = version
         self.records = records or {}
+        self.forbidden = forbidden
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        self.versions_asked = 0
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
         body = json.loads(request.content) if request.content else {}
         if path == "/web/webclient/version_info":
+            self.versions_asked += 1
             info = {
                 "server_version": f"{self.version}.0",
                 "server_version_info": [self.version, 0, 0],
@@ -219,18 +201,31 @@ class FakeOdoo:
             if request.headers.get("X-Odoo-Database") != "shop":
                 return httpx.Response(404, text="<!DOCTYPE html><h1>Not Found</h1>")
             model, method = path.split("/")[3:5]
+            if model in self.forbidden:
+                error = {
+                    "name": "odoo.exceptions.AccessError",
+                    "message": "No access",
+                    "debug": "tb",
+                }
+                return httpx.Response(403, json=error)
             return self.answer(model, method, body)
         if path == "/jsonrpc":
             params = body["params"]
             if params["service"] == "common":
                 db, login, key, _ = params["args"]
-                ok = db == "shop" and login == "admin" and key == KEY
+                ok = db == "shop" and login == "admin" and key in (KEY, PASSWORD)
                 return httpx.Response(200, json={"jsonrpc": "2.0", "result": 2 if ok else False})
             db, uid, key, model, method, _args, kwargs = params["args"]
-            if key != KEY:
+            if key not in (KEY, PASSWORD):
                 error = {"code": 200, "data": {"name": "odoo.exceptions.AccessDenied"}}
                 return httpx.Response(200, json={"jsonrpc": "2.0", "error": error})
+            if model in self.forbidden:
+                data = {"name": "odoo.exceptions.AccessError", "message": "No", "debug": "tb"}
+                return httpx.Response(200, json={"jsonrpc": "2.0", "error": {"data": data}})
             response = self.answer(model, method, kwargs)
+            if response.is_error:
+                data = {"name": "builtins.KeyError", "message": model, "debug": "tb"}
+                return httpx.Response(200, json={"jsonrpc": "2.0", "error": {"data": data}})
             return httpx.Response(200, json={"jsonrpc": "2.0", "result": response.json()})
         return httpx.Response(404, text="nope")
 
@@ -240,20 +235,31 @@ class FakeOdoo:
             return httpx.Response(200, json={"uid": 2, "lang": "en_US"})
         if model == "res.users" and method == "search_read":
             return httpx.Response(200, json=[{"id": 2, "name": "Mitchell Admin", "login": "admin"}])
-        if model == "res.users" and method == "search_count":
-            return httpx.Response(200, json=1)
         if model == "res.company" and method == "search_read":
             return httpx.Response(
-                200, json=[{"id": 1, "name": "My Company", "currency_id": [2, "RON"]}]
+                200,
+                json=[
+                    {"id": 1, "name": "My Company", "currency_id": [2, "RON"]},
+                    {"id": 3, "name": "Other", "currency_id": [1, "EUR"]},
+                ],
             )
         if model == "ir.model":
-            return httpx.Response(200, json=[{"model": m} for m in ("res.partner", "sale.order")])
+            installed = ("res.partner", "sale.order", "account.move", *self.forbidden)
+            wanted = kwargs["domain"][0][2]
+            return httpx.Response(200, json=[{"model": m} for m in installed if m in wanted])
         if method == "fields_get":
             return httpx.Response(200, json=self.FIELDS)
         rows = self.records.get(model)
         if rows is None:
+            if method == "search_count" and model in ("sale.order", "account.move"):
+                return httpx.Response(200, json=0)
             return httpx.Response(
-                404, json={"message": f"the model '{model}' does not exist", "debug": "tb"}
+                404,
+                json={
+                    "name": "werkzeug.exceptions.NotFound",
+                    "message": f"the model '{model}' does not exist",
+                    "debug": "tb",
+                },
             )
         since = next((t[2] for t in kwargs.get("domain", []) if t[0] == "write_date"), None)
         found = sorted(
@@ -272,9 +278,6 @@ class FakeOdoo:
         )
 
     def source(self, **credentials: str) -> OdooSource:
-        async def no_wait(_: float) -> None:
-            return None
-
         source = create_erp_source(
             odoo_config(**credentials), transport=httpx.MockTransport(self.handler), sleep=no_wait
         )
@@ -288,38 +291,61 @@ class FakeOdoo:
 async def test_check_reports_version_user_and_companies() -> None:
     info = await FakeOdoo().source().check()
     assert (info.version, info.api, info.user) == ("19.0", "json2", "admin")
-    assert [(c.id, c.name, c.currency) for c in info.companies] == [("1", "My Company", "RON")]
+    assert [(c.id, c.name, c.currency) for c in info.companies] == [
+        ("1", "My Company", "RON"),
+        ("3", "Other", "EUR"),
+    ]
 
 
-async def test_reads_include_archived_records_and_every_company() -> None:
+async def test_reads_include_archived_records_every_company_in_english() -> None:
     fake = FakeOdoo(records={"res.partner": [partner(1, "2026-10-01 10:00:00")]})
-    await fake.source().read("partners")
+    await fake.source().read(PARTNERS)
     model, method, kwargs = fake.calls[-1]
     assert (model, method) == ("res.partner", "search_read")
-    assert kwargs["context"] == {"active_test": False, "allowed_company_ids": [1]}
+    assert kwargs["context"] == {
+        "active_test": False,
+        "lang": "en_US",
+        "allowed_company_ids": [1, 3],
+    }
     assert kwargs["order"] == "write_date asc, id asc"
 
 
-async def test_records_have_core_columns_names_and_the_raw_record_without_secrets() -> None:
+async def test_records_come_back_as_odoo_answers_without_secrets_or_bulky_fields() -> None:
     fake = FakeOdoo(records={"res.partner": [partner(7, "2026-10-01 10:00:00")]})
-    [record] = (await fake.source().read("partners")).records
+    [record] = (await fake.source().read(PARTNERS)).records
     assert record.id == "7" and record.updated_at == dt.datetime(2026, 10, 1, 10, tzinfo=UTC)
-    values = record.values
-    assert (
-        values["name"] == "Partner 7"
-        and values["is_customer"] is True
-        and values["is_supplier"] is False
-    )
-    assert values["country"] == "Romania" and values["email"] is None
-    assert (values["salesperson_id"], values["salesperson_name"]) == ("2", "Mitchell Admin")
-    assert values["company_id"] == "1" and values["created_at"] == dt.datetime(
-        2026, 1, 2, 3, 4, 5, tzinfo=UTC
-    )
+    assert record.raw["country_id"] == [185, "Romania"] and record.raw["email"] is False
+    assert record.raw["x_studio_tier"] == "gold"
     read_fields = fake.calls[-1][2]["fields"]
-    assert "x_studio_tier" in read_fields and "name" in read_fields
+    assert {"name", "x_studio_tier", "country_id", "write_date"} <= set(read_fields)
     for skipped in ("access_token", "child_ids", "message_ids", "image_1920", "comment"):
-        assert skipped not in read_fields
-    assert "access_token" not in record.raw
+        assert skipped not in read_fields and skipped not in record.raw
+    # Not stored and not asked for as `extra`.
+    assert "display_name" not in read_fields
+
+
+async def test_extra_fields_are_read_only_when_the_model_has_them() -> None:
+    fake = FakeOdoo(records={"res.partner": [partner(7, "2026-10-01 10:00:00")]})
+    await fake.source().read({**PARTNERS, "extra": ["display_name", "list_price"]})
+    read_fields = fake.calls[-1][2]["fields"]
+    assert "display_name" in read_fields and "list_price" not in read_fields
+
+
+async def test_explicit_fields_replace_the_stored_ones() -> None:
+    fake = FakeOdoo(records={"res.partner": [partner(7, "2026-10-01 10:00:00")]})
+    await fake.source().read({**PARTNERS, "fields": ["name", "access_token", "nope"]})
+    # Asked for by name, so read (the application decided); unknown names are dropped.
+    assert fake.calls[-1][2]["fields"] == ["access_token", "name", "write_date"]
+
+
+async def test_a_spec_domain_is_kept_and_the_cursor_added() -> None:
+    fake = FakeOdoo(records={"res.partner": [partner(1, "2026-10-01 10:00:00")]})
+    spec = {**PARTNERS, "domain": [("is_company", "=", True)]}
+    await fake.source().read(spec, Cursor(dt.datetime(2026, 9, 1, 12, 30, tzinfo=UTC)))
+    assert fake.calls[-1][2]["domain"] == [
+        ["is_company", "=", True],
+        ["write_date", ">=", "2026-09-01 12:30:00"],
+    ]
 
 
 async def test_paging_survives_many_records_changed_in_the_same_second() -> None:
@@ -329,12 +355,13 @@ async def test_paging_survives_many_records_changed_in_the_same_second() -> None
     source = FakeOdoo(records={"res.partner": rows}).source()
     seen: list[str] = []
     cursor = None
-    for _ in range(10):
-        page = await source.read("partners", cursor, page_size=3)
-        seen += [r.id for r in page.records]
-        if page.next_cursor is None:
-            break
-        cursor = page.next_cursor
+    async with source:
+        for _ in range(10):
+            page = await source.read(PARTNERS, cursor, page_size=3)
+            seen += [r.id for r in page.records]
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
     assert seen == [str(i) for i in range(1, 9)]
 
 
@@ -343,22 +370,49 @@ async def test_an_incremental_read_starts_at_the_cursor_time() -> None:
     page = (
         await FakeOdoo(records={"res.partner": rows})
         .source()
-        .read("partners", Cursor(dt.datetime(2026, 10, 2, tzinfo=UTC)))
+        .read(PARTNERS, Cursor(dt.datetime(2026, 10, 2, tzinfo=UTC)))
     )
     assert [r.id for r in page.records] == ["2"] and page.next_cursor is None
 
 
-async def test_count_ids_and_installed_entities() -> None:
+async def test_one_entered_source_signs_in_once() -> None:
+    rows = [partner(1, "2026-10-01 10:00:00")]
+    fake = FakeOdoo(records={"res.partner": rows})
+    source = fake.source()
+    async with source:
+        await source.check()
+        await source.count(PARTNERS)
+        await source.read(PARTNERS)
+        await source.list_ids(PARTNERS)
+    assert fake.versions_asked == 1
+    assert [c[1] for c in fake.calls].count("context_get") == 1
+
+
+async def test_count_ids_fields_and_available_models() -> None:
     rows = [partner(1, "2026-10-01 10:00:00"), partner(2, "2026-10-02 10:00:00")]
-    source = FakeOdoo(records={"res.partner": rows}).source()
-    assert await source.count("partners") == 2
-    assert await source.list_ids("partners") == ["1", "2"]
-    assert await source.entities() == ["partners", "sale_orders"]
-    fields = {f.name: f for f in await source.describe("partners")}
-    assert (
-        fields["x_studio_tier"].type == "selection"
-        and fields["country_id"].relation == "res.country"
-    )
+    source = FakeOdoo(records={"res.partner": rows}, forbidden=("hr.employee",)).source()
+    assert await source.count(PARTNERS) == 2
+    assert await source.list_ids(PARTNERS) == ["1", "2"]
+    specs = {
+        "res_partner": PARTNERS,
+        "sale_order": {"model": "sale.order"},
+        "mrp_production": {"model": "mrp.production"},  # not installed
+        "hr_employee": {"model": "hr.employee"},  # installed, not readable
+    }
+    assert await source.available(specs) == ["res_partner", "sale_order"]
+    fields = {f.name: f for f in await source.fields(PARTNERS)}
+    assert fields["x_studio_tier"].selection == (("gold", "Gold"), ("silver", "Silver"))
+    assert fields["country_id"].relation == "res.country" and fields["country_id"].help
+    assert fields["display_name"].stored is False
+
+
+async def test_a_model_the_user_may_not_read_is_access_denied() -> None:
+    for version, credentials in ((19, {}), (18, {"username": "admin"})):
+        source = FakeOdoo(version=version, forbidden=("hr.employee",)).source(**credentials)
+        with pytest.raises(ReportError) as caught:
+            await source.read({"model": "hr.employee"})
+        assert caught.value.reason == "access_denied" and not caught.value.auth
+        assert "tb" not in str(caught.value)
 
 
 @pytest.mark.parametrize(
@@ -382,22 +436,23 @@ async def test_unreachable() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused", request=request)
 
-    source = create_erp_source(
-        odoo_config(), transport=httpx.MockTransport(handler), sleep=lambda _: _noop()
-    )
+    source = create_erp_source(odoo_config(), transport=httpx.MockTransport(handler), sleep=no_wait)
     with pytest.raises(ReportError) as caught:
         await source.check()
     assert caught.value.reason == "unreachable"
 
 
-async def _noop() -> None:
-    return None
-
-
 async def test_an_unknown_model_is_refused_without_odoo_s_traceback() -> None:
     with pytest.raises(ReportError) as caught:
-        await FakeOdoo(records={}).source().read("partners")
+        await FakeOdoo(records={}).source().read({"model": "x.nope"})
     assert caught.value.reason == "request_failed" and "tb" not in str(caught.value)
+    assert "does not exist" in caught.value.diagnostics
+
+
+async def test_a_spec_without_a_model_is_refused() -> None:
+    with pytest.raises(ReportError) as caught:
+        await FakeOdoo().source().read({})
+    assert caught.value.reason == "request_failed"
 
 
 async def test_not_configured() -> None:
@@ -411,8 +466,8 @@ async def test_odoo_before_19_reads_over_jsonrpc_with_the_login() -> None:
     source = fake.source(username="admin")
     info = await source.check()
     assert (info.api, info.user) == ("jsonrpc", "admin")
-    [record] = (await source.read("partners")).records
-    assert record.values["name"] == "Partner 3"
+    [record] = (await source.read(PARTNERS)).records
+    assert record.raw["name"] == "Partner 3"
 
 
 async def test_odoo_before_19_needs_the_login() -> None:
@@ -425,3 +480,55 @@ async def test_odoo_before_19_refused_key_is_auth_failed() -> None:
     with pytest.raises(ReportError) as caught:
         await FakeOdoo(version=18).source(username="admin", api_key="wrong").check()
     assert caught.value.reason == "auth_failed"
+
+
+async def test_a_password_falls_back_to_jsonrpc_on_19_with_a_login() -> None:
+    fake = FakeOdoo(records={"res.partner": [partner(3, "2026-10-01 10:00:00")]})
+    source = fake.source(username="admin", api_key=PASSWORD)
+    info = await source.check()
+    assert (info.version, info.api) == ("19.0", "jsonrpc")
+    assert [r.id for r in (await source.read(PARTNERS)).records] == ["3"]
+
+
+async def test_a_refused_key_without_a_login_stays_refused_on_19() -> None:
+    with pytest.raises(ReportError) as caught:
+        await FakeOdoo().source(api_key=PASSWORD).check()
+    assert caught.value.reason == "auth_failed" and caught.value.auth
+
+
+def test_a_busy_odoo_is_retried() -> None:
+    request = httpx.Request("POST", "http://odoo.test/json/2/res.partner/search_read")
+    for status in (429, 502, 503):
+        assert type(classify(httpx.Response(status, request=request))).__name__ == "Retry"
+
+
+async def test_busy_then_answering_is_read() -> None:
+    fake = FakeOdoo(records={"res.partner": [partner(1, "2026-10-01 10:00:00")]})
+    answers = iter([httpx.Response(503, text="busy")])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("search_read") and "res.partner" in request.url.path:
+            busy = next(answers, None)
+            if busy is not None:
+                return busy
+        return fake.handler(request)
+
+    source = create_erp_source(odoo_config(), transport=httpx.MockTransport(handler), sleep=no_wait)
+    assert len((await source.read(PARTNERS)).records) == 1
+
+
+@pytest.mark.parametrize(
+    ("pasted", "base"),
+    [
+        ("https://shop.odoo.com", "https://shop.odoo.com"),
+        ("https://shop.odoo.com/", "https://shop.odoo.com"),
+        ("shop.odoo.com", "https://shop.odoo.com"),
+        ("https://shop.odoo.com/odoo/action-123?debug=1", "https://shop.odoo.com"),
+        ("https://shop.odoo.com/web#menu_id=3&action=12", "https://shop.odoo.com"),
+        ("https://shop.odoo.com/web/login", "https://shop.odoo.com"),
+        ("http://localhost:8069/odoo", "http://localhost:8069"),
+        ("https://erp.example.com/odoo-prod/web", "https://erp.example.com/odoo-prod"),
+    ],
+)
+def test_a_pasted_browser_address_is_cut_to_the_instance(pasted: str, base: str) -> None:
+    assert FakeOdoo().source(url=pasted).base_url == base
