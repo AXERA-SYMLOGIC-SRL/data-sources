@@ -198,7 +198,8 @@ def google(handler: Any) -> Any:
                 return httpx.Response(200, json={"refresh_token": "r1"})
             assert form["refresh_token"] == ["r1"]
             return httpx.Response(200, json={"access_token": "a1"})
-        return handler(request)
+        response: httpx.Response = handler(request)
+        return response
 
     return wrapped
 

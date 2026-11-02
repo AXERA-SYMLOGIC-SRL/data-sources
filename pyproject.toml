@@ -68,6 +68,10 @@ asyncio_mode = "auto"
 line-length = 100
 target-version = "py311"
 
+[tool.ruff.format]
+# Ruff 0.16 also formats Python inside Markdown code blocks; the docs' examples are aligned by hand.
+exclude = ["*.md"]
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 

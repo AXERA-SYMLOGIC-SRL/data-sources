@@ -232,7 +232,7 @@ class FakeOdoo:
                 return httpx.Response(404, text="<!DOCTYPE html><h1>Not Found</h1>")
             model, method = path.split("/")[3:5]
             if model in self.forbidden:
-                error = {
+                error: dict[str, Any] = {
                     "name": "odoo.exceptions.AccessError",
                     "message": "No access",
                     "debug": "tb",

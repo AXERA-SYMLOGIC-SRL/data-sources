@@ -179,7 +179,9 @@ async def test_invalid_metric_points_fail(sleep: Sleeper, entry: dict[str, Any])
         )
 
 
-async def test_search_keywords_are_read_a_month_at_a_time(sleep: Sleeper, monkeypatch) -> None:
+async def test_search_keywords_are_read_a_month_at_a_time(
+    sleep: Sleeper, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(gbp, "_today", lambda: date(2026, 2, 10))
     months: list[tuple[str, str]] = []
 

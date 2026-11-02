@@ -278,6 +278,8 @@ class TikTokOrganicReports(ReportSource):
             ):
                 raise INVALID.error()
             videos.extend(page)
+            if not isinstance(data, dict):  # a page came back, so it did: for the type checker
+                raise INVALID.error()
             more, after = data.get("has_more"), data.get("cursor")
             if not more:
                 return videos
