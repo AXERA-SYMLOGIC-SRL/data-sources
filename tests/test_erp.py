@@ -156,6 +156,22 @@ class FakeOdoo:
         "access_token": {"type": "char", "store": True, "string": "Security Token"},
         "child_ids": {"type": "one2many", "store": True, "string": "Contacts"},
         "message_ids": {"type": "one2many", "store": True, "string": "Messages"},
+        "message_main_attachment_id": {
+            "type": "many2one",
+            "store": True,
+            "relation": "ir.attachment",
+            "string": "Main Attachment",
+        },
+        "message_type": {"type": "selection", "store": True, "string": "Type"},
+        # A field named like JSON-RPC's error envelope (`l10n.ro.message.spv.error`).
+        "error": {"type": "text", "store": True, "string": "Error"},
+        # Credentials SECRET_WORDS don't name; SEO keywords and a flag are no credentials.
+        "key_download": {"type": "char", "store": True, "string": "Key Download"},
+        "attendance_kiosk_key": {"type": "char", "store": True, "string": "Kiosk Key"},
+        "l10n_ro_edi_client_id": {"type": "char", "store": True, "string": "Client ID"},
+        "proxy_ip": {"type": "char", "store": True, "string": "Proxy IP"},
+        "website_meta_keywords": {"type": "char", "store": True, "string": "SEO Keywords"},
+        "hr_presence_control_ip": {"type": "boolean", "store": True, "string": "Based on IP"},
         "image_1920": {"type": "binary", "store": True, "string": "Image"},
         "comment": {"type": "html", "store": True, "string": "Notes"},
         "display_name": {"type": "char", "store": False, "string": "Display name"},
@@ -169,6 +185,19 @@ class FakeOdoo:
         "write_date": {"type": "datetime", "store": True, "string": "Last updated"},
     }
 
+    #: `ir.model`: what the database holds (models it lists without a stored `write_date`:
+    #: `l10n.ro.no_log`).
+    CATALOGUE = [
+        {"model": "sale.order", "name": "Sales Order", "modules": "sale"},
+        {"model": "l10n.ro.message.spv", "name": "SPV Message", "modules": "l10n_ro_message_spv"},
+        {"model": "l10n.ro.no_log", "name": "No log", "modules": "l10n_ro_x"},
+        {"model": "ir.cron", "name": "Scheduled Actions", "modules": "base"},
+        {"model": "mail.message", "name": "Message", "modules": "mail"},
+        {"model": "res.users.settings", "name": "User Settings", "modules": "base, mail"},
+        {"model": "website.page", "name": "Page", "modules": "website"},
+        {"model": "x_fleet_tyre", "name": "Tyres", "modules": ""},
+    ]
+
     def __init__(
         self,
         version: int = 19,
@@ -180,6 +209,7 @@ class FakeOdoo:
         self.forbidden = forbidden
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
         self.versions_asked = 0
+        self.model_domains: list[Any] = []
 
     def handler(self, request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -243,6 +273,17 @@ class FakeOdoo:
                     {"id": 3, "name": "Other", "currency_id": [1, "EUR"]},
                 ],
             )
+        if model == "ir.model" and method == "fields_get":
+            meta = {"model": {"type": "char"}, "transient": {"type": "boolean"}}
+            return httpx.Response(
+                200, json={**meta, "abstract": {"type": "boolean"}} if self.version >= 19 else meta
+            )
+        if model == "ir.model" and kwargs["domain"][0][0] == "transient":
+            self.model_domains.append(kwargs["domain"])
+            return httpx.Response(200, json=self.CATALOGUE)
+        if model == "ir.model.fields":
+            stamped = [m["model"] for m in self.CATALOGUE if m["model"] != "l10n.ro.no_log"]
+            return httpx.Response(200, json=[{"model": m} for m in stamped])
         if model == "ir.model":
             installed = ("res.partner", "sale.order", "account.move", *self.forbidden)
             wanted = kwargs["domain"][0][2]
@@ -404,6 +445,44 @@ async def test_count_ids_fields_and_available_models() -> None:
     assert fields["x_studio_tier"].selection == (("gold", "Gold"), ("silver", "Silver"))
     assert fields["country_id"].relation == "res.country" and fields["country_id"].help
     assert fields["display_name"].stored is False
+
+
+async def test_fields_say_whether_a_plain_read_takes_them() -> None:
+    fields = {f.name: f for f in await FakeOdoo().source().fields(PARTNERS)}
+    assert fields["name"].readable and fields["x_studio_tier"].readable
+    # Files, HTML, child lists, the chatter, credentials and computed fields aren't read.
+    for name in (
+        "image_1920",
+        "comment",
+        "child_ids",
+        "message_ids",
+        "message_main_attachment_id",
+        "access_token",
+        "display_name",
+        "key_download",
+        "attendance_kiosk_key",
+        "l10n_ro_edi_client_id",
+        "proxy_ip",
+    ):
+        assert not fields[name].readable, name
+    # A module's own plain field under a chatter-like name is read (the kind of an ANAF message),
+    # and a field named `error` is a field, not Odoo refusing (JSON-2 answers with the result).
+    assert fields["message_type"].readable and fields["error"].readable
+    assert fields["website_meta_keywords"].readable and fields["hr_presence_control_ip"].readable
+
+
+@pytest.mark.parametrize("version", [19, 17])
+async def test_models_lists_business_records_of_modules_and_studio(version: int) -> None:
+    odoo = FakeOdoo(version=version)
+    found = await odoo.source(username="admin").models()
+    assert [(m.name, m.label, m.modules) for m in found] == [
+        ("l10n.ro.message.spv", "SPV Message", ("l10n_ro_message_spv",)),
+        ("sale.order", "Sales Order", ("sale",)),
+        ("x_fleet_tyre", "Tyres", ()),
+    ]
+    # Wizards always left out; abstract models where Odoo can say so (19 and later).
+    expected = [["transient", "=", False]] + ([["abstract", "=", False]] if version >= 19 else [])
+    assert odoo.model_domains == [expected]
 
 
 async def test_a_model_the_user_may_not_read_is_access_denied() -> None:

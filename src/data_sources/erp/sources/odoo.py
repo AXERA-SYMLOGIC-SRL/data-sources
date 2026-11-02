@@ -20,9 +20,10 @@ What is read is a spec in Odoo's terms:
 A record comes back as Odoo answers `search_read`: a many2one is `[id, "display name"]`, a
 many2many a list of ids, and every empty value is `false`. Without `fields`, every stored field
 the user may read is asked for (custom `x_` fields included) except one2many lists, binaries,
-HTML bodies, properties, the chatter and activity widgets, and credential-like names
-(`SECRET_WORDS`). Every read includes archived records (`active_test: False`) and every company
-the user may access, in English (`lang: en_US`), oldest change (`write_date`) first.
+HTML bodies, properties, the chatter's links, and credential-like names (`SECRET_WORDS`, and
+text fields named like a key, a client id or an IP: `CREDENTIAL_NAME`). Every read includes
+archived records (`active_test: False`) and every company the user may access, in English
+(`lang: en_US`), oldest change (`write_date`) first.
 """
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from data_sources.erp.base import (
     SECRET_WORDS,
     Company,
     Cursor,
+    ErpModel,
     ErpRecord,
     ErpSource,
     NativeField,
@@ -64,10 +66,52 @@ NO_ACCESS = Problem("access_denied", "The Odoo user may not read this.")
 
 #: Field types never read: lists of child ids, files, HTML bodies, property bags.
 SKIPPED_TYPES = {"one2many", "binary", "html", "properties", "properties_definition"}
-#: Field-name prefixes never read: the chatter, activities, ratings, website messages, and
-#: Odoo's magic fields.
-SKIPPED_PREFIXES = ("message_", "activity_", "website_message", "rating_", "__")
+#: Field-name prefixes of the chatter, activities, ratings and website messages: their links
+#: (messages, followers, attachments) are never read. A plain value under such a name is a
+#: module's own field (`l10n.ro.message.spv.message_type`, the kind of ANAF message): it is.
+CHATTER_PREFIXES = ("message_", "activity_", "website_message", "rating_")
+RELATIONAL_TYPES = {"many2one", "one2many", "many2many", "many2one_reference"}
+#: A text field named like an access credential `SECRET_WORDS` don't catch: a key (a kiosk's,
+#: ANAF's e-Factura `key_download`), an OAuth client id, an IP address or allow list. Whole words
+#: only: `website_meta_keywords` is kept.
+CREDENTIAL_NAME = re.compile(r"(^|_)(key|ip)(_|$)|client_id")
 FIELD_ATTRIBUTES = ["string", "type", "relation", "store", "selection", "help"]
+#: Odoo's own machinery, never offered as more to read (`models`): settings and metadata, users and
+#: their groups, the chatter and live chat, the bus, the website builder and themes, reports,
+#: digests, spreadsheets, SMS, ratings, phone blacklists, barcode rules.
+TECHNICAL_MODELS = (
+    "ir.",
+    "base.",
+    "base_",
+    "bus.",
+    "mail.",
+    "discuss.",
+    "res.users",
+    "res.groups",
+    "res.config",
+    "auth",
+    "iap.",
+    "web",
+    "digest.",
+    "spreadsheet",
+    "report.",
+    "sms.",
+    "snailmail.",
+    "onboarding.",
+    "publisher_warranty",
+    "theme.",
+    "html_editor",
+    "decimal.precision",
+    "fetchmail.",
+    "privacy.",
+    "properties.",
+    "rating.",
+    "phone.",
+    "barcode",
+    "im_livechat",
+    "chatbot.",
+    "_unknown",
+)
 #: The first major version read through JSON-2.
 JSON2_FROM = 19
 
@@ -117,7 +161,10 @@ def classify(response: httpx.Response) -> Verdict:
         return _problem(*_error_parts(body)) if is_json else NO_DATABASE
     if response.is_error:
         return _problem(*_error_parts(body))
-    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+    # Only a JSON-RPC answer carries its error in `error`: a JSON-2 answer is the method's own
+    # result, and `fields_get` of a model with a field named `error` (Romania's SPV messages) has
+    # that key too.
+    if isinstance(body, dict) and "jsonrpc" in body and isinstance(body.get("error"), dict):
         return _problem(*_error_parts(body["error"]))
     return None
 
@@ -137,8 +184,10 @@ def readable(name: str, spec: Mapping[str, Any]) -> bool:
     return (
         bool(spec.get("store"))
         and spec.get("type") not in SKIPPED_TYPES
-        and not name.startswith(SKIPPED_PREFIXES)
+        and not name.startswith("__")
+        and not (name.startswith(CHATTER_PREFIXES) and spec.get("type") in RELATIONAL_TYPES)
         and not any(word in name for word in SECRET_WORDS)
+        and not (spec.get("type") in ("char", "text") and CREDENTIAL_NAME.search(name))
     )
 
 
@@ -383,8 +432,47 @@ class OdooSource(ErpSource):
                     if isinstance(pair, list | tuple) and len(pair) == 2
                 ),
                 str(f.get("help") or ""),
+                readable(name, f),
             )
             for name, f in sorted(found.items())
+        ]
+
+    async def models(self) -> list[ErpModel]:
+        """Every kind of record the database keeps (`ir.model`) that a spec can read: not
+        transient (wizards) or abstract, with a stored `write_date` (the cursor needs it), not
+        Odoo's own machinery (`TECHNICAL_MODELS`); modules' and the customer's models included.
+        Whether the user may read one is `available`'s to say."""
+        async with self:
+            await self._ready()
+            known = await self._model_fields("ir.model")
+            domain: list[Any] = [["transient", "=", False]]
+            if "abstract" in known:  # Odoo 19 and later
+                domain.append(["abstract", "=", False])
+            found = await self._raw_call(
+                "ir.model", "search_read", domain=domain, fields=["model", "name", "modules"]
+            )
+            stamped = await self._raw_call(
+                "ir.model.fields",
+                "search_read",
+                domain=[["name", "=", "write_date"], ["store", "=", True]],
+                fields=["model"],
+            )
+        if not isinstance(found, list) or not isinstance(stamped, list):
+            raise INVALID.error()
+        with_cursor = {str(f.get("model")) for f in stamped if isinstance(f, dict)}
+        return [
+            ErpModel(
+                str(m["model"]),
+                str(m.get("name") or m["model"]),
+                tuple(
+                    sorted(x.strip() for x in str(m.get("modules") or "").split(",") if x.strip())
+                ),
+            )
+            for m in sorted(
+                (m for m in found if isinstance(m, dict) and m.get("model")),
+                key=lambda m: str(m["model"]),
+            )
+            if str(m["model"]) in with_cursor and not str(m["model"]).startswith(TECHNICAL_MODELS)
         ]
 
     def read_fields(self, spec: Spec, fields: Mapping[str, Mapping[str, Any]]) -> list[str]:

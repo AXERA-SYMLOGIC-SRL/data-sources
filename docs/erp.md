@@ -37,18 +37,24 @@ async with source:                           # one connection (and one sign-in) 
             cursor = page.next_cursor
     ids_now = await source.list_ids(specs["sale_order"])  # what you store and isn't here was deleted
     fields = await source.fields(specs["sale_order"])     # NativeField(name, label, type, relation, stored,
-                                                          #             selection, help), custom ones included
+                                                          #   selection, help, readable), custom ones included
+    more = await source.models()                          # ErpModel(name, label, modules): what else it holds
 ```
 
-- `raw`: the record as the ERP returned it, minus child-id lists, binaries, HTML bodies, chatter fields and anything
+- `raw`: the record as the ERP returned it, minus child-id lists, binaries, HTML bodies and anything
   whose name contains a `SECRET_WORDS` word (`token`, `password`, `secret`, `signature`, `api_key`: Odoo's portal
-  `access_token` must not leave it).
+  `access_token` must not leave it); for Odoo also text fields named like a key, a client id or an IP
+  (`CREDENTIAL_NAME`: a kiosk key, ANAF's e-Factura `key_download`, a printer's IP), and the chatter's links.
 - **Cursor** `(updated_at, offset)`: records changed at or after `updated_at`, skipping the first `offset` of that
   second. ERPs report change times in whole seconds and bulk operations change thousands of records in one second;
   Odoo even stores microseconds it doesn't return, so `write_date = t` matches nothing and a `(time, id)` keyset would
   lose records. To resume later, start from a stored time (no offset): re-reading a few records is harmless when you
   upsert by id.
 - **Deletions**: ERPs don't report them; compare `list_ids` with what you hold.
+- **What else is there**: `NativeField.readable` says whether a read that names no fields takes a field (what an
+  application can count on finding in `raw`); `models()` lists the kinds of business records the instance holds
+  (modules' and the customer's included, technical ones left out), for an application to offer. Empty for an ERP with
+  a fixed set.
 - **Errors**: `data_sources.reports.ReportError` with `reason` `auth_failed`, `unreachable`, `database_not_found`,
   `access_denied` (the user may not read that model: skip it), `unavailable` (retried first), `request_failed`,
   `not_configured`. Messages never hold the key; `diagnostics` holds the ERP's own error name and message, never its
@@ -66,6 +72,9 @@ async with source:                           # one connection (and one sign-in) 
 - **Spec:** `{"model", "domain"?, "extra"?, "fields"?}`. Without `fields`, every stored field the user may read is
   asked for (custom `x_` fields included, minus the skipped ones above), plus the `extra` ones the model has
   (non-stored fields the application wants, such as `product.product.list_price`); `fields` asks for exactly those.
+- **Models:** `models()` reads `ir.model`: not transient, not abstract (19 and later can say), with a stored
+  `write_date` (`ir.model.fields`), and not Odoo's machinery (`TECHNICAL_MODELS`: settings, users and groups, the
+  chatter and live chat, the bus, website, reports, ...). 292 on the local Odoo 19 with ~40 apps.
 - **Reads:** `search_read` ordered `write_date, id`, with `active_test=False` (archived records included), every
   company the user may access (`allowed_company_ids`) and `lang=en_US`. `available` checks `ir.model` and a
   zero-record `search_count` per model (an `AccessError` means not readable). An unknown database is a 404 HTML page

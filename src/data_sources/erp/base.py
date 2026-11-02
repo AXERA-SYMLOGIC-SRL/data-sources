@@ -83,6 +83,19 @@ class NativeField:
     #: For a selection: `(value, label)` pairs, in the ERP's order.
     selection: tuple[tuple[str, str], ...] = ()
     help: str = ""
+    #: Whether a read that names no fields takes it (stored, and not a file, an HTML body, a list
+    #: of child ids, the chatter or a credential): what an application can count on finding.
+    readable: bool = True
+
+
+@dataclass(frozen=True)
+class ErpModel:
+    """A kind of record the instance holds, beyond what an application reads by default: its
+    technical name (what a spec names), its label, and the modules that define it."""
+
+    name: str
+    label: str
+    modules: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -159,6 +172,12 @@ class ErpSource(ABC):
     @abstractmethod
     async def fields(self, spec: Spec) -> list[NativeField]:
         """The native fields of what `spec` reads, custom ones included."""
+
+    async def models(self) -> list[ErpModel]:
+        """The kinds of business records this instance holds and a spec can read (modules and the
+        customer's extensions included; technical ones left out), for an application to offer.
+        An ERP with a fixed set has nothing to add: empty."""
+        return []
 
     @abstractmethod
     async def count(self, spec: Spec) -> int:
