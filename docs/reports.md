@@ -25,6 +25,7 @@ registry first loads. An application builds a source from a `ConnectorConfig`:
 | `tiktok_organic` | `TikTokOrganicReports` (`tiktok_organic`) | TikTok Display API v2 | `client_key`, `client_secret`, `redirect_uri` | |
 | `facebook_pages` | `FacebookPagesReports` (`meta_organic`) | Graph API (Pages) | same as `meta_ads` (the same app) | `api_version` |
 | `instagram` | `InstagramReports` (`meta_organic`) | Graph API (Instagram) | same as `meta_ads` (the same app) | `api_version` |
+| `microsoft_clarity` | `MicrosoftClarityReports` (`microsoft_clarity`) | Clarity Data Export API (`project-live-insights`) | none: the grant is a project API token, pasted (no OAuth) | |
 | `bing_webmaster` | `BingWebmasterReports` (`bing_webmaster`) | Bing Webmaster API (JSON, `ssl.bing.com/webmaster/api.svc/json`) | `client_id`, `client_secret`, `redirect_uri` (an OAuth client registered in Bing Webmaster Tools → Settings → API Access, not Azure) | |
 
 The credentials are the **application's** (its OAuth client); what a user's consent buys comes
@@ -81,6 +82,7 @@ Every source implements `authorize_url(state)`, `exchange_code(code) -> Grant`,
 | `tiktok_organic` | `access_token`, `refresh_token`, `open_id`, `scope` (`expires_in`: the refresh token's) | the user's `open_id` | `report` (`account` or `videos`): a snapshot of now, every record labelled with today. Tokens last a day: `refresh_grant` renews them |
 | `facebook_pages` | `access_token` (the user's name, ~60 days) | a Page id | `report`: `daily` (a record per day, `{"metrics": {...}}`), `page` and `posts` (snapshots) |
 | `instagram` | `access_token` (the user's name, ~60 days) | the Instagram account id (`group`: its Page) | `report`: `daily` (a record per day), `account`, `media` and `audience` (snapshots) |
+| `microsoft_clarity` | `api_token` (a project's Data Export token, made by a project admin; no identity, no expiry known) | `project` (a token reads the one project it was made in) | `dimensions`? (up to 3 of `Browser`, `Device`, `Country/Region`, `OS`, `Source`, `Medium`, `Campaign`, `Channel`, `URL`), `num_of_days`? (1, 2 or 3; default 1): totals over the last 24/48/72 hours, no daily split, every record labelled with today (UTC) and its metric in `metricName`. One request per read, 10 a project a day; at most 1,000 rows a metric (envelope `truncated`). **Not run against a live project:** response fields beyond `Traffic`'s are not documented |
 | `bing_webmaster` | `access_token` (an hour), `refresh_token` (the latest), `consent_refresh_token` (the consent's, never replaced), `expires_at` (ISO, UTC); no identity | a verified site URL | `report`: `traffic` (`GetRankAndTrafficStats`, daily), `crawl` (`GetCrawlStats`, daily), `queries` / `pages` (`GetQueryStats` / `GetPageStats`, top queries and pages by week, the page URL in `Query`). Scope `webmaster.read`. Bing has no date parameters: every call returns all it keeps (~6 months), `read` keeps the rows dated in `since..until` (WCF dates, `/Date(ms±hhmm)/`), and the envelope's `available` says how many rows and which days Bing had. `refresh_grant` tries the latest refresh token, then the consent's (a rotated token was reported refused). **Not run against a live account:** the API host for Bearer tokens, refresh rotation, the fault's shape and the weekly label's meaning are from Microsoft's docs, which disagree in places |
 
 A source keeps its provider's own calls too, for what doesn't fit the interface: GA's
@@ -129,6 +131,7 @@ Everything a provider refuses raises `ReportError` with a `reason`; `ReportAuthE
 | `no_refresh_token` | Google's consent returned no refresh token |
 | `access_denied` | the consent didn't grant the scope asked for |
 | `customer_not_enabled` | a Google Ads customer is disabled (skipped when listing customers) |
+| `rate_limited` | a daily request quota is spent, so asking again won't help before it resets (Microsoft Clarity: 10 a project a day, never retried) |
 | `report_timeout` | an asynchronous report (Microsoft Advertising) wasn't built within the source's `report_timeout` |
 
 Messages never contain a credential or the provider's response body; Google Ads refusals are

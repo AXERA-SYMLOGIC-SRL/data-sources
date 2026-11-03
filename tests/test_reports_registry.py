@@ -41,6 +41,7 @@ PROVIDERS = [
     "instagram",
     "meta_ads",
     "microsoft_ads",
+    "microsoft_clarity",
     "tiktok_ads",
     "tiktok_organic",
 ]
