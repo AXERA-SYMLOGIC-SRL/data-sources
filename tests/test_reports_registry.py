@@ -39,6 +39,7 @@ PROVIDERS = [
     "google_merchant",
     "google_search_console",
     "instagram",
+    "linkedin_ads",
     "meta_ads",
     "microsoft_ads",
     "microsoft_clarity",
