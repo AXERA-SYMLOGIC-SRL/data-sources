@@ -24,6 +24,27 @@ SIMPLE_UPLOAD_LIMIT = 4 * 1024 * 1024
 CHUNK_SIZE = 32 * 320 * 1024
 
 
+def site_path(url: str) -> list[str]:
+    """The segments of the server-relative path of the site a SharePoint address is in.
+
+    A site may be a subsite (`/sites/Finance/Emea`), so its end is found from what follows
+    it: the site's `_layouts` (`/sites/Finance/Emea/_layouts/15/AllItems.aspx`) or a
+    library's `Forms` (`/sites/Finance/Emea/Shared Documents/Forms/AllItems.aspx`). An
+    address with neither is taken to be in a top-level site (`/sites/Finance`), or the
+    tenant's root site for a path that does not start with `sites`, `teams` or `personal`.
+    """
+    segments = [s for s in unquote(urlparse(url).path).split("/") if s]
+    lowered = [s.lower() for s in segments]
+    if "_layouts" in lowered:
+        return segments[: lowered.index("_layouts")]
+    for i in range(1, len(lowered) - 1):
+        if lowered[i] == "forms" and lowered[i + 1].endswith(".aspx"):
+            return segments[: i - 1]
+    if lowered and lowered[0] in ("sites", "teams", "personal"):
+        return segments[:2]
+    return []
+
+
 class GraphCredential(Protocol):
     async def get_token(self, *scopes: str) -> Any: ...
 
@@ -128,11 +149,9 @@ class SharepointClient:
                 yield chunk
 
     async def get_site_id(self, site_url: str) -> str:
-        parsed = urlparse(site_url)
-        site_path = (
-            "/".join(parsed.path.split("/")[:3]) if parsed.path and parsed.path != "/" else ""
-        )
-        result = await self.get_json(f"{self.BASE_URL}/sites/{parsed.netloc}:{site_path}")
+        segments = site_path(site_url)
+        path = quote("/" + "/".join(segments)) if segments else ""
+        result = await self.get_json(f"{self.BASE_URL}/sites/{urlparse(site_url).netloc}:{path}")
         return str(result["id"])
 
     def get_drive_ids(self, site_id: str) -> AsyncIterator[dict[str, Any]]:
@@ -338,13 +357,23 @@ class SharepointClient:
 
     @staticmethod
     def parse_sharing_url(url: str) -> tuple[str, str]:
-        """Split a SharePoint `AllItems.aspx?id=...` sharing URL into `(drive_name, item_path)`."""
+        """Split a SharePoint `AllItems.aspx?id=...` sharing URL into `(drive_name, item_path)`.
+
+        The drive is the first segment of `id` after the URL's site (see `site_path`), so a
+        subsite's (`/sites/Finance/Emea/_layouts/15/AllItems.aspx?id=/sites/Finance/Emea/Docs`)
+        and the root site's (`/_layouts/15/AllItems.aspx?id=/Docs`) are found too.
+        """
         queries = urlparse(url).query
         id_param = next((q for q in queries.split("&") if q.startswith("id=")), None)
         if id_param is None:
             raise ValueError(f"Not a SharePoint sharing URL (missing 'id=' query param): {url}")
 
-        segments = unquote(id_param.removeprefix("id=")).split("/")
-        drive_name = segments[3]
-        item_path = "/".join(segments[4:]) or "/"
+        segments = [s for s in unquote(id_param.removeprefix("id=")).split("/") if s]
+        site = [s.casefold() for s in site_path(url)]
+        if [s.casefold() for s in segments[: len(site)]] != site:
+            site = segments[:2]  # `id` is in another site: taken to be a top-level one, as before
+        if len(segments) <= len(site):
+            raise ValueError(f"Not a SharePoint sharing URL (no library in 'id'): {url}")
+        drive_name = segments[len(site)]
+        item_path = "/".join(segments[len(site) + 1 :]) or "/"
         return drive_name, item_path

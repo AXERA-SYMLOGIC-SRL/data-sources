@@ -154,6 +154,66 @@ class TestParseSharingUrl:
         with pytest.raises(ValueError):
             SharepointClient.parse_sharing_url("https://contoso.sharepoint.com/sites/Finance")
 
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            (  # a subsite: its drive used to be read as the subsite's name
+                "https://contoso.sharepoint.com/sites/Finance/Emea/_layouts/15/AllItems.aspx"
+                "?id=/sites/Finance/Emea/Shared%20Documents/Q1",
+                ("Shared Documents", "Q1"),
+            ),
+            (  # the browser's address on a subsite's library
+                "https://contoso.sharepoint.com/sites/Finance/Emea/Shared%20Documents/Forms/AllItems.aspx"
+                "?id=%2Fsites%2FFinance%2FEmea%2FShared%20Documents%2FQ1&viewid=6f1c",
+                ("Shared Documents", "Q1"),
+            ),
+            (  # the tenant's root site
+                "https://contoso.sharepoint.com/_layouts/15/AllItems.aspx?id=/Shared%20Documents/Q1",
+                ("Shared Documents", "Q1"),
+            ),
+            (  # an `id` in another site is taken to be in a top-level one, as before
+                "https://contoso.sharepoint.com/sites/Finance/_layouts/15/AllItems.aspx?id=/sites/Ops/Docs/A",
+                ("Docs", "A"),
+            ),
+            (
+                "https://contoso.sharepoint.com/sites/Finance/_layouts/15/AllItems.aspx?id=/sites/Finance/Docs",
+                ("Docs", "/"),
+            ),
+        ],
+    )
+    def test_finds_the_drive_after_the_site(self, url: str, expected: tuple[str, str]) -> None:
+        assert SharepointClient.parse_sharing_url(url) == expected
+
+    def test_raises_on_id_without_a_library(self) -> None:
+        with pytest.raises(ValueError):
+            SharepointClient.parse_sharing_url(
+                "https://contoso.sharepoint.com/sites/Finance/_layouts/15/AllItems.aspx?id=/sites/Finance"
+            )
+
+
+class TestSitePath:
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("https://contoso.sharepoint.com/sites/Finance", ["sites", "Finance"]),
+            ("https://contoso.sharepoint.com/sites/Finance/whatever", ["sites", "Finance"]),
+            (
+                "https://contoso.sharepoint.com/sites/Finance/Emea/_layouts/15/AllItems.aspx?id=/x",
+                ["sites", "Finance", "Emea"],
+            ),
+            (
+                "https://contoso.sharepoint.com/sites/Finance/Emea/Docs/Forms/AllItems.aspx",
+                ["sites", "Finance", "Emea"],
+            ),
+            # a site named Forms
+            ("https://contoso.sharepoint.com/sites/Forms", ["sites", "Forms"]),
+            ("https://contoso.sharepoint.com/Docs/Forms/AllItems.aspx", []),
+            ("https://contoso.sharepoint.com/", []),
+        ],
+    )
+    def test_finds_where_the_site_ends(self, url: str, expected: list[str]) -> None:
+        assert sharepoint_client.site_path(url) == expected
+
 
 class TestConnectorConstruction:
     def test_requires_url_option(self) -> None:
@@ -899,6 +959,36 @@ class TestSharepointClientAgainstGraph:
         site_id = await client.get_site_id("https://contoso.sharepoint.com/sites/Finance/whatever")
 
         assert site_id == "site1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("url", "path"),
+        [
+            (
+                "https://contoso.sharepoint.com/sites/Finance/Emea/_layouts/15/AllItems.aspx?id=/x",
+                "/v1.0/sites/contoso.sharepoint.com:/sites/Finance/Emea",
+            ),
+            (
+                "https://contoso.sharepoint.com/_layouts/15/AllItems.aspx?id=/Docs",
+                "/v1.0/sites/contoso.sharepoint.com:",
+            ),
+        ],
+    )
+    async def test_get_site_id_of_a_subsite_and_the_root_site(self, url: str, path: str) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.url.path)
+            return httpx.Response(200, json={"id": "site1"})
+
+        client = SharepointClient(
+            FakeCredential(),
+            ["scope"],
+            http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+
+        assert await client.get_site_id(url) == "site1"
+        assert seen == [path]
 
     @pytest.mark.asyncio
     async def test_get_folder_addresses_a_path_or_the_drive_root(self) -> None:
